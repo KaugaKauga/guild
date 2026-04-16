@@ -97,11 +97,15 @@ async fn run_gh(args: &[&str]) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("gh {} failed (exit {}): {}", args.first().unwrap_or(&""), output.status, stderr.trim());
+        bail!(
+            "gh {} failed (exit {}): {}",
+            args.first().unwrap_or(&""),
+            output.status,
+            stderr.trim()
+        );
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("gh stdout was not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("gh stdout was not valid UTF-8")?;
     Ok(stdout)
 }
 
@@ -121,11 +125,15 @@ async fn run_git(args: &[&str], dir: &Path) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git {} failed (exit {}): {}", args.first().unwrap_or(&""), output.status, stderr.trim());
+        bail!(
+            "git {} failed (exit {}): {}",
+            args.first().unwrap_or(&""),
+            output.status,
+            stderr.trim()
+        );
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("git stdout was not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("git stdout was not valid UTF-8")?;
     Ok(stdout)
 }
 
@@ -140,12 +148,18 @@ async fn run_git(args: &[&str], dir: &Path) -> Result<String> {
 /// .
 pub async fn fetch_labeled_issues(repo: &str, label: &str) -> Result<Vec<Issue>> {
     let json = run_gh(&[
-        "issue", "list",
-        "--repo", repo,
-        "--label", label,
-        "--state", "open",
-        "--json", "number,title,body,state,labels",
-        "--limit", "50",
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--label",
+        label,
+        "--state",
+        "open",
+        "--json",
+        "number,title,body,state,labels",
+        "--limit",
+        "50",
     ])
     .await
     .context("fetch_labeled_issues")?;
@@ -159,15 +173,18 @@ pub async fn fetch_labeled_issues(repo: &str, label: &str) -> Result<Vec<Issue>>
 pub async fn fetch_issue_detail(repo: &str, number: u64) -> Result<Issue> {
     let number_str = number.to_string();
     let json = run_gh(&[
-        "issue", "view", &number_str,
-        "--repo", repo,
-        "--json", "number,title,body,state,labels,comments",
+        "issue",
+        "view",
+        &number_str,
+        "--repo",
+        repo,
+        "--json",
+        "number,title,body,state,labels,comments",
     ])
     .await
     .context("fetch_issue_detail")?;
 
-    let issue: Issue =
-        serde_json::from_str(&json).context("failed to parse issue detail JSON")?;
+    let issue: Issue = serde_json::from_str(&json).context("failed to parse issue detail JSON")?;
     Ok(issue)
 }
 
@@ -178,8 +195,13 @@ pub async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
         .context("clone_repo: destination path is not valid UTF-8")?;
 
     run_gh(&[
-        "repo", "clone", repo, dest_str,
-        "--", "--depth=1", "--single-branch",
+        "repo",
+        "clone",
+        repo,
+        dest_str,
+        "--",
+        "--depth=1",
+        "--single-branch",
     ])
     .await
     .context("clone_repo")?;
@@ -245,13 +267,8 @@ pub async fn create_draft_pr(
 ) -> Result<u64> {
     // gh pr create prints the PR URL to stdout (e.g. https://github.com/owner/repo/pull/42)
     let url = run_gh(&[
-        "pr", "create",
-        "--repo", repo,
-        "--base", base,
-        "--head", head,
-        "--title", title,
-        "--body", body,
-        "--draft",
+        "pr", "create", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body",
+        body, "--draft",
     ])
     .await
     .context("create_draft_pr")?;
@@ -272,14 +289,17 @@ pub async fn create_draft_pr(
 pub async fn fetch_pr_status(repo: &str, pr_number: u64) -> Result<PrStatus> {
     let number_str = pr_number.to_string();
     let json = run_gh(&[
-        "pr", "view", &number_str,
-        "--repo", repo,
-        "--json", "number,state,mergeable,reviewDecision,statusCheckRollup,comments,reviews",
+        "pr",
+        "view",
+        &number_str,
+        "--repo",
+        repo,
+        "--json",
+        "number,state,mergeable,reviewDecision,statusCheckRollup,comments,reviews",
     ])
     .await
     .context("fetch_pr_status")?;
 
-    let status: PrStatus =
-        serde_json::from_str(&json).context("failed to parse PR status JSON")?;
+    let status: PrStatus = serde_json::from_str(&json).context("failed to parse PR status JSON")?;
     Ok(status)
 }
