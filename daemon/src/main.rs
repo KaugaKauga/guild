@@ -160,14 +160,14 @@ async fn main() -> Result<()> {
 
         // 2. Create new pipelines for issues we have not seen yet.
         for issue in &issues {
-            if !pipelines.contains_key(&issue.number) {
+            if let std::collections::hash_map::Entry::Vacant(e) = pipelines.entry(issue.number) {
                 info!(issue = issue.number, "new issue detected, creating pipeline");
                 let p = pipeline::Pipeline::new(
                     issue.number,
                     config.repo.clone(),
                     &config.runs_dir,
                 );
-                pipelines.insert(issue.number, p);
+                e.insert(p);
             }
         }
 

@@ -7,6 +7,11 @@ You are an autonomous coding agent. Your job is to write the code and tests.
 - Read `plan.md` for the implementation plan
 - The worktree is your working directory — all file paths are relative to it
 
+## Repo Learnings
+- Read `learnings.md` (from the run directory) — it contains important repo-specific
+  conventions, gotchas, and patterns discovered from previous work.
+- Follow these learnings. They take priority over general assumptions.
+
 ## Instructions
 1. Follow the plan from the PLAN stage
 2. Write production code

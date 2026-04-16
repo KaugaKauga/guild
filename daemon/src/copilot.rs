@@ -72,7 +72,7 @@ pub async fn run_copilot(copilot_cmd: &str, prompt_file: &Path, work_dir: &Path)
         info!("copilot completed successfully");
         Ok(())
     } else {
-        let code = status.code().unwrap_or_else(|| -1);
+        let code = status.code().unwrap_or(-1);
         error!(code, "copilot exited with non-zero status");
         bail!("copilot exited with code {}", code)
     }
