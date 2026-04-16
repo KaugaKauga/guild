@@ -204,7 +204,7 @@ pub async fn commit_all(worktree: &Path, message: &str) -> Result<()> {
 
     // Check if there is anything to commit (git diff --cached --quiet exits 1 if there are changes).
     let has_changes = Command::new("git")
-        .args(&["diff", "--cached", "--quiet"])
+        .args(["diff", "--cached", "--quiet"])
         .current_dir(worktree)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

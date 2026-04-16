@@ -194,6 +194,28 @@ impl Pipeline {
             }
         }
 
+        // Check for repo-specific learnings.
+        let learnings_path = self.worktree.join(".guild").join("learnings.md");
+        let learnings = if learnings_path.exists() {
+            fs::read_to_string(&learnings_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Persist learnings to run dir for later stages.
+        if !learnings.is_empty() {
+            fs::write(self.run_dir.join("learnings.md"), &learnings)
+                .context("Understand: failed to write learnings.md")?;
+        }
+
+        summary.push_str("\n## Repo Learnings\n");
+        if learnings.is_empty() {
+            summary.push_str("- (no .guild/learnings.md found)\n");
+        } else {
+            summary.push_str(&learnings);
+            summary.push('\n');
+        }
+
         summary.push_str("\n## Directory Tree (depth 2)\n```\n");
         summary.push_str(&tree);
         summary.push_str("```\n");
@@ -222,6 +244,11 @@ impl Pipeline {
             "(no repo summary)",
         );
 
+        let learnings = read_file_or(
+            &self.run_dir.join("learnings.md"),
+            "",
+        );
+
         let prompt = format!(
             "You are an autonomous coding agent in the PLAN stage.\n\
              \n\
@@ -234,6 +261,9 @@ impl Pipeline {
              ## Repo Structure\n\
              {repo_summary}\n\
              \n\
+             ## Repo Learnings (IMPORTANT — read before planning)\n\
+             {learnings}\n\
+             \n\
              ## Instructions\n\
              1. Read the issue carefully -- understand acceptance criteria\n\
              2. Trace the user path -- what component does this touch?\n\
@@ -241,6 +271,7 @@ impl Pipeline {
              4. Include: files to create/modify, tests to write, UI wiring needed\n",
             issue_body = issue_body,
             repo_summary = repo_summary,
+            learnings = learnings,
             plan_path = self.run_dir.join("plan.md").display(),
         );
 
@@ -265,6 +296,10 @@ impl Pipeline {
             &self.run_dir.join("plan.md"),
             "No plan file found -- read the issue and implement directly.",
         );
+        let learnings = read_file_or(
+            &self.run_dir.join("learnings.md"),
+            "",
+        );
 
         let prompt = format!(
             "You are an autonomous coding agent in the IMPLEMENT stage.\n\
@@ -278,6 +313,9 @@ impl Pipeline {
              ## Plan\n\
              {plan}\n\
              \n\
+             ## Repo Learnings (IMPORTANT — read before implementing)\n\
+             {learnings}\n\
+             \n\
              ## Instructions\n\
              1. Write the code in the worktree at: {worktree}\n\
              2. Write tests\n\
@@ -285,6 +323,7 @@ impl Pipeline {
              4. Do NOT commit -- the system will handle that\n",
             issue_body = issue_body,
             plan = plan,
+            learnings = learnings,
             worktree = self.worktree.display(),
         );
 
@@ -511,6 +550,10 @@ impl Pipeline {
             &self.run_dir.join("issue_body.md"),
             "(no issue body)",
         );
+        let learnings = read_file_or(
+            &self.run_dir.join("learnings.md"),
+            "",
+        );
 
         let prompt = format!(
             "You are an autonomous coding agent in the FIX stage.\n\
@@ -524,12 +567,16 @@ impl Pipeline {
              ## Original Issue\n\
              {issue_body}\n\
              \n\
+             ## Repo Learnings (IMPORTANT — read before fixing)\n\
+             {learnings}\n\
+             \n\
              ## Instructions\n\
              1. Read the blocker report above\n\
              2. Fix failing checks, address review comments\n\
              3. Do NOT commit -- the system will handle that\n",
             blocker_report = blocker_report,
             issue_body = issue_body,
+            learnings = learnings,
         );
 
         let prompt_path = self.run_dir.join("prompt_fix.md");
