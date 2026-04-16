@@ -35,6 +35,10 @@ struct Cli {
     /// Directory where run artifacts are stored
     #[arg(long, default_value = "./runs")]
     runs_dir: String,
+
+    /// Maximum number of pipelines to advance concurrently
+    #[arg(short = 'c', long, default_value_t = 3)]
+    max_concurrent: usize,
 }
 
 /// Runtime configuration derived from CLI arguments.
@@ -45,6 +49,7 @@ pub struct Config {
     pub poll_interval: u64,
     pub copilot_cmd: String,
     pub runs_dir: PathBuf,
+    pub max_concurrent: usize,
 }
 
 impl Config {
@@ -55,6 +60,7 @@ impl Config {
             poll_interval: cli.poll_interval,
             copilot_cmd: cli.copilot_cmd.clone(),
             runs_dir: PathBuf::from(&cli.runs_dir),
+            max_concurrent: cli.max_concurrent,
         }
     }
 }
@@ -114,6 +120,7 @@ async fn main() -> Result<()> {
     info!("  poll_interval  : {}s", config.poll_interval);
     info!("  copilot_cmd    : {}", config.copilot_cmd);
     info!("  runs_dir       : {}", config.runs_dir.display());
+    info!("  max_concurrent : {}", config.max_concurrent);
     info!("=======================================================");
 
     // --- ensure runs dir ---------------------------------------------------
@@ -171,27 +178,43 @@ async fn main() -> Result<()> {
             }
         }
 
-        // 3. Advance every active pipeline.
+        // 3. Advance active pipelines concurrently (up to max_concurrent).
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
+        let mut join_set = tokio::task::JoinSet::new();
+
         let keys: Vec<u64> = pipelines.keys().copied().collect();
         for key in keys {
-            if let Some(p) = pipelines.get_mut(&key) {
+            if let Some(p) = pipelines.remove(&key) {
                 if p.is_done() || p.is_failed() {
+                    pipelines.insert(key, p);
                     continue;
                 }
-                match p.advance(&config).await {
-                    Ok(true) => {
-                        info!(issue = key, "pipeline made progress");
+                let cfg = config.clone();
+                let sem = Arc::clone(&semaphore);
+                join_set.spawn(async move {
+                    let _permit = sem.acquire().await.expect("semaphore closed");
+                    let mut pipeline = p;
+                    let result = pipeline.advance(&cfg).await;
+                    (key, pipeline, result)
+                });
+            }
+        }
+
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((key, pipeline, result)) => {
+                    match &result {
+                        Ok(true) => info!(issue = key, "pipeline made progress"),
+                        Ok(false) => {}
+                        Err(e) => {
+                            error!(issue = key, "pipeline advance error: {:#}", e);
+                            warn!(issue = key, "pipeline marked as failed");
+                        }
                     }
-                    Ok(false) => {
-                        // No progress this cycle, nothing to log at info level.
-                    }
-                    Err(e) => {
-                        error!(issue = key, "pipeline advance error: {:#}", e);
-                        // The pipeline module is expected to have marked itself
-                        // as failed internally when it returns Err. We log the
-                        // failure here for visibility.
-                        warn!(issue = key, "pipeline marked as failed");
-                    }
+                    pipelines.insert(key, pipeline);
+                }
+                Err(e) => {
+                    error!("pipeline task panicked: {:#}", e);
                 }
             }
         }
