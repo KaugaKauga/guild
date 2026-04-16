@@ -196,8 +196,31 @@ async fn main() -> Result<()> {
                 join_set.spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
                     let mut pipeline = p;
-                    let result = pipeline.advance(&cfg).await;
-                    (key, pipeline, result)
+                    // Drive the pipeline forward through all stages until it
+                    // stalls (no progress), fails, or completes. This lets
+                    // mechanical stages (Ingest, Understand, Submit) run
+                    // back-to-back without waiting for the next poll cycle.
+                    let mut last_result = Ok(false);
+                    loop {
+                        match pipeline.advance(&cfg).await {
+                            Ok(true) => {
+                                tracing::info!(issue = key, stage = ?pipeline.stage, "pipeline advanced");
+                                last_result = Ok(true);
+                                // Keep going — try the next stage immediately.
+                                continue;
+                            }
+                            Ok(false) => {
+                                // No progress (e.g. Watch with no changes). Stop.
+                                last_result = Ok(last_result.unwrap_or(false));
+                                break;
+                            }
+                            Err(e) => {
+                                last_result = Err(e);
+                                break;
+                            }
+                        }
+                    }
+                    (key, pipeline, last_result)
                 });
             }
         }

@@ -13,7 +13,9 @@ The factory runs in stages:
 
 2. UNDERSTAND — read the target repo. Check .github/workflows/ for CI
    and PR comment triggers. Read a sample source + test file. Read
-   CONTRIBUTING.md or AGENTS.md.
+   CONTRIBUTING.md or AGENTS.md. Read .guild/learnings.md if it exists —
+   this file contains repo-specific learnings that MUST be followed in
+   all subsequent stages.
 
 3. PLAN — trace the full user path. What component does this replace or
    extend? How does a user reach it? What wiring is needed? Feature flag? When the plan is done add the plan 
