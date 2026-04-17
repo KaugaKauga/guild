@@ -142,14 +142,20 @@ fn run_status(runs_dir: &str) -> Result<()> {
     if pipelines.is_empty() {
         println!("No active pipelines.");
     } else {
-        println!("{:<8} {:<14} {:<12} Branch", "Issue", "Stage", "Progress");
-        println!("{}", "─".repeat(60));
+        println!("{:<8} {:<32} {:<14} {:<12} Branch", "Issue", "Title", "Stage", "Progress");
+        println!("{}", "─".repeat(90));
         for p in pipelines.values() {
             let ordinal = p.stage.ordinal();
             let total = pipeline::Stage::total_stages();
+            let title = if p.issue_title.chars().count() > 30 {
+                let t: String = p.issue_title.chars().take(30).collect();
+                format!("{}…", t)
+            } else {
+                p.issue_title.clone()
+            };
             println!(
-                "#{:<7} {:<14} {}/{:<10} {}",
-                p.issue_number, p.stage, ordinal, total, p.branch_name
+                "#{:<7} {:<32} {:<14} {}/{:<10} {}",
+                p.issue_number, title, p.stage, ordinal, total, p.branch_name
             );
         }
     }
