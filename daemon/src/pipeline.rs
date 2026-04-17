@@ -116,8 +116,8 @@ impl Pipeline {
             .context("Ingest: failed to fetch issue detail")?;
 
         // Persist the full issue JSON.
-        let issue_json = serde_json::to_string_pretty(&issue)
-            .context("Ingest: failed to serialise issue")?;
+        let issue_json =
+            serde_json::to_string_pretty(&issue).context("Ingest: failed to serialise issue")?;
         fs::write(self.run_dir.join("issue.json"), &issue_json)
             .context("Ingest: failed to write issue.json")?;
 
@@ -132,10 +132,7 @@ impl Pipeline {
         fs::write(self.run_dir.join("issue_comments.json"), &comments_json)
             .context("Ingest: failed to write issue_comments.json")?;
 
-        info!(
-            "Ingested issue #{}: {}",
-            issue.number, issue.title
-        );
+        info!("Ingested issue #{}: {}", issue.number, issue.title);
 
         self.stage = Stage::Understand;
         Ok(true)
@@ -151,17 +148,13 @@ impl Pipeline {
 
         // Scan for notable files.
         let ci_workflows = scan_glob(&self.worktree, ".github/workflows", "yml");
-        let contributing_docs = scan_known_files(
-            &self.worktree,
-            &["CONTRIBUTING.md", "AGENTS.md"],
-        );
+        let contributing_docs = scan_known_files(&self.worktree, &["CONTRIBUTING.md", "AGENTS.md"]);
         let build_files = scan_known_files(
             &self.worktree,
             &["package.json", "Cargo.toml", "go.mod", "pyproject.toml"],
         );
 
-        let tree = dir_tree(&self.worktree, 2)
-            .context("Understand: failed to build dir tree")?;
+        let tree = dir_tree(&self.worktree, 2).context("Understand: failed to build dir tree")?;
 
         // Write repo_summary.md
         let mut summary = String::new();
@@ -235,19 +228,10 @@ impl Pipeline {
     }
 
     async fn do_plan(&mut self, config: &Config) -> Result<bool> {
-        let issue_body = read_file_or(
-            &self.run_dir.join("issue_body.md"),
-            "(no issue body)",
-        );
-        let repo_summary = read_file_or(
-            &self.run_dir.join("repo_summary.md"),
-            "(no repo summary)",
-        );
+        let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
+        let repo_summary = read_file_or(&self.run_dir.join("repo_summary.md"), "(no repo summary)");
 
-        let learnings = read_file_or(
-            &self.run_dir.join("learnings.md"),
-            "",
-        );
+        let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
 
         let prompt = format!(
             "You are an autonomous coding agent in the PLAN stage.\n\
@@ -276,8 +260,7 @@ impl Pipeline {
         );
 
         let prompt_path = self.run_dir.join("prompt_plan.md");
-        fs::write(&prompt_path, &prompt)
-            .context("Plan: failed to write prompt_plan.md")?;
+        fs::write(&prompt_path, &prompt).context("Plan: failed to write prompt_plan.md")?;
 
         copilot::run_copilot(&config.copilot_cmd, &prompt_path, &self.worktree)
             .await
@@ -288,18 +271,12 @@ impl Pipeline {
     }
 
     async fn do_implement(&mut self, config: &Config) -> Result<bool> {
-        let issue_body = read_file_or(
-            &self.run_dir.join("issue_body.md"),
-            "(no issue body)",
-        );
+        let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
         let plan = read_file_or(
             &self.run_dir.join("plan.md"),
             "No plan file found -- read the issue and implement directly.",
         );
-        let learnings = read_file_or(
-            &self.run_dir.join("learnings.md"),
-            "",
-        );
+        let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
 
         let prompt = format!(
             "You are an autonomous coding agent in the IMPLEMENT stage.\n\
@@ -356,8 +333,7 @@ impl Pipeline {
         );
 
         let prompt_path = self.run_dir.join("prompt_verify.md");
-        fs::write(&prompt_path, &prompt)
-            .context("Verify: failed to write prompt_verify.md")?;
+        fs::write(&prompt_path, &prompt).context("Verify: failed to write prompt_verify.md")?;
 
         copilot::run_copilot(&config.copilot_cmd, &prompt_path, &self.worktree)
             .await
@@ -384,15 +360,10 @@ impl Pipeline {
             self.issue_number,
         );
 
-        let pr_number = github::create_draft_pr(
-            &self.repo,
-            "main",
-            &self.branch_name,
-            &pr_title,
-            &pr_body,
-        )
-        .await
-        .context("Submit: failed to create draft PR")?;
+        let pr_number =
+            github::create_draft_pr(&self.repo, "main", &self.branch_name, &pr_title, &pr_body)
+                .await
+                .context("Submit: failed to create draft PR")?;
 
         info!("Draft PR #{} created", pr_number);
         self.pr_number = Some(pr_number);
@@ -428,8 +399,11 @@ impl Pipeline {
             .collect();
 
         // Collect formal review bodies when changes are requested.
-        let review_comments: Vec<&github::Review> = if status.review_decision == "CHANGES_REQUESTED" {
-            status.reviews.iter()
+        let review_comments: Vec<&github::Review> = if status.review_decision == "CHANGES_REQUESTED"
+        {
+            status
+                .reviews
+                .iter()
                 .filter(|r| r.state == "CHANGES_REQUESTED")
                 .collect()
         } else {
@@ -466,13 +440,15 @@ impl Pipeline {
         // Done condition: all checks green, review approved (or none), state open,
         // and no @guild comments or change-request reviews pending.
         let all_checks_pass = failed_checks.is_empty();
-        let review_ok =
-            status.review_decision == "APPROVED" || status.review_decision.is_empty();
+        let review_ok = status.review_decision == "APPROVED" || status.review_decision.is_empty();
         let state_ok = status.state == "OPEN" || status.state == "open";
         let no_actionable = guild_comments.is_empty() && review_comments.is_empty();
 
         if all_checks_pass && review_ok && state_ok && no_actionable {
-            info!("PR #{} is green with no actionable feedback! Marking done.", pr_number);
+            info!(
+                "PR #{} is green with no actionable feedback! Marking done.",
+                pr_number
+            );
             self.stage = Stage::Done;
             return Ok(true);
         }
@@ -546,14 +522,8 @@ impl Pipeline {
             &self.run_dir.join("blocker_report.md"),
             "(no blocker report)",
         );
-        let issue_body = read_file_or(
-            &self.run_dir.join("issue_body.md"),
-            "(no issue body)",
-        );
-        let learnings = read_file_or(
-            &self.run_dir.join("learnings.md"),
-            "",
-        );
+        let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
+        let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
 
         let prompt = format!(
             "You are an autonomous coding agent in the FIX stage.\n\
@@ -580,8 +550,7 @@ impl Pipeline {
         );
 
         let prompt_path = self.run_dir.join("prompt_fix.md");
-        fs::write(&prompt_path, &prompt)
-            .context("Fix: failed to write prompt_fix.md")?;
+        fs::write(&prompt_path, &prompt).context("Fix: failed to write prompt_fix.md")?;
 
         copilot::run_copilot(&config.copilot_cmd, &prompt_path, &self.worktree)
             .await
@@ -663,7 +632,6 @@ fn dir_tree_inner(
     Ok(())
 }
 
-
 /// Read a file to string, returning `fallback` if the file doesn't exist.
 fn read_file_or(path: &Path, fallback: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|_| fallback.to_string())
@@ -681,7 +649,8 @@ fn scan_glob(base: &Path, subdir: &str, extension: &str) -> Vec<String> {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(ext) = path.extension() {
-                if ext == extension || path.to_string_lossy().ends_with(&format!(".{}", extension)) {
+                if ext == extension || path.to_string_lossy().ends_with(&format!(".{}", extension))
+                {
                     let rel = format!("{}/{}", subdir, entry.file_name().to_string_lossy());
                     results.push(rel);
                 }
