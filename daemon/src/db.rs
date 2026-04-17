@@ -43,7 +43,8 @@ impl Db {
                 worktree            TEXT NOT NULL,
                 pr_number           INTEGER,
                 blocker_fingerprint TEXT,
-                branch_name         TEXT NOT NULL
+                branch_name         TEXT NOT NULL,
+                issue_title         TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS completed (
@@ -69,7 +70,7 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT issue_number, repo, stage, run_dir, worktree,
-                        pr_number, blocker_fingerprint, branch_name
+                        pr_number, blocker_fingerprint, branch_name, issue_title
                  FROM   pipelines",
             )
             .context("failed to prepare pipeline query")?;
@@ -94,6 +95,7 @@ impl Db {
                     pr_number: row.get(5)?,
                     blocker_fingerprint: row.get(6)?,
                     branch_name: row.get(7)?,
+                    issue_title: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                 })
             })
             .context("failed to query pipelines")?;
@@ -141,15 +143,16 @@ impl Db {
         conn.execute(
             "INSERT INTO pipelines
                 (issue_number, repo, stage, run_dir, worktree,
-                 pr_number, blocker_fingerprint, branch_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 pr_number, blocker_fingerprint, branch_name, issue_title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(issue_number) DO UPDATE SET
                 stage               = excluded.stage,
                 run_dir             = excluded.run_dir,
                 worktree            = excluded.worktree,
                 pr_number           = excluded.pr_number,
                 blocker_fingerprint = excluded.blocker_fingerprint,
-                branch_name         = excluded.branch_name",
+                branch_name         = excluded.branch_name,
+                issue_title         = excluded.issue_title",
             params![
                 p.issue_number,
                 p.repo,
@@ -159,6 +162,7 @@ impl Db {
                 p.pr_number,
                 p.blocker_fingerprint,
                 p.branch_name,
+                p.issue_title,
             ],
         )
         .context("failed to upsert pipeline")?;
@@ -194,7 +198,8 @@ impl Db {
         )
         .context("failed to delete completed pipeline")?;
 
-        tx.commit().context("failed to commit completion transaction")?;
+        tx.commit()
+            .context("failed to commit completion transaction")?;
         Ok(())
     }
 
@@ -264,8 +269,8 @@ impl Db {
                 tx.execute(
                     "INSERT OR IGNORE INTO pipelines
                         (issue_number, repo, stage, run_dir, worktree,
-                         pr_number, blocker_fingerprint, branch_name)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                         pr_number, blocker_fingerprint, branch_name, issue_title)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         p.issue_number,
                         p.repo,
@@ -275,6 +280,7 @@ impl Db {
                         p.pr_number,
                         p.blocker_fingerprint,
                         p.branch_name,
+                        p.issue_title,
                     ],
                 )
                 .context("failed to migrate active pipeline")?;
