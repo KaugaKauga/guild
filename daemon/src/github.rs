@@ -209,11 +209,33 @@ pub async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Create and switch to a new branch inside .
-pub async fn create_branch(worktree: &Path, branch: &str) -> Result<()> {
-    run_git(&["checkout", "-b", branch], worktree)
+/// Check out an existing remote branch, or create a new local branch if it
+/// does not exist on the remote.
+///
+/// This avoids the situation where a fresh shallow clone tries to create a
+/// branch that already exists on origin, which would later cause a push
+/// rejection.
+pub async fn checkout_or_create_branch(worktree: &Path, branch: &str) -> Result<()> {
+    // Try to fetch the branch from origin.
+    let fetch_result = run_git(&["fetch", "origin", branch], worktree).await;
+
+    if fetch_result.is_ok() {
+        // Branch exists on remote — check it out tracking the remote.
+        run_git(
+            &["checkout", "-b", branch, &format!("origin/{}", branch)],
+            worktree,
+        )
         .await
-        .context("create_branch")?;
+        .context("checkout_or_create_branch: failed to checkout existing remote branch")?;
+        tracing::info!("checked out existing remote branch: {}", branch);
+    } else {
+        // Branch does not exist on remote — create a new one.
+        run_git(&["checkout", "-b", branch], worktree)
+            .await
+            .context("checkout_or_create_branch: failed to create new branch")?;
+        tracing::info!("created new branch: {}", branch);
+    }
+
     Ok(())
 }
 
@@ -251,7 +273,7 @@ pub async fn commit_all(worktree: &Path, message: &str) -> Result<()> {
 
 /// Push  to origin, setting upstream tracking.
 pub async fn push_branch(worktree: &Path, branch: &str) -> Result<()> {
-    run_git(&["push", "-u", "origin", branch], worktree)
+    run_git(&["push", "--force-with-lease", "-u", "origin", branch], worktree)
         .await
         .context("push_branch")?;
     Ok(())
@@ -283,6 +305,32 @@ pub async fn create_draft_pr(
         .with_context(|| format!("create_draft_pr: failed to parse PR number from: {}", url))?;
 
     Ok(pr_number)
+}
+
+/// Find an existing pull request for the given head branch.
+/// Returns `Some(pr_number)` if one exists, `None` otherwise.
+pub async fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<u64>> {
+    let json = run_gh(&[
+        "pr", "list",
+        "--repo", repo,
+        "--head", branch,
+        "--json", "number",
+        "--limit", "1",
+    ])
+    .await
+    .context("find_pr_for_branch")?;
+
+    let prs: Vec<serde_json::Value> =
+        serde_json::from_str(&json).context("failed to parse PR list JSON")?;
+
+    if let Some(pr) = prs.first() {
+        let number = pr["number"]
+            .as_u64()
+            .context("find_pr_for_branch: PR number not found in response")?;
+        Ok(Some(number))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Fetch the current status of a pull request (checks, review, mergeable).
