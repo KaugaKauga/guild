@@ -163,8 +163,7 @@ async fn main() -> Result<()> {
                 issue = issue.number,
                 "new issue detected, creating pipeline"
             );
-            let p =
-                pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir);
+            let p = pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir);
             if let Err(e) = db.upsert_pipeline(&p) {
                 error!(
                     issue = issue.number,
@@ -239,7 +238,8 @@ async fn main() -> Result<()> {
                                 if let Err(e) = db_handle.upsert_pipeline(&pipeline) {
                                     tracing::error!(
                                         issue = key,
-                                        "failed to persist pipeline after advance: {:#}", e
+                                        "failed to persist pipeline after advance: {:#}",
+                                        e
                                     );
                                 }
                                 tracing::info!(
