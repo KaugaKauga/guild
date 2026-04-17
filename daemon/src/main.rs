@@ -4,7 +4,7 @@ mod pipeline;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -167,6 +167,10 @@ async fn main() -> Result<()> {
             }
         };
 
+        // Build a set of issue numbers currently active on GitHub so we can
+        // clean up stale entries later.
+        let active_on_github: HashSet<u64> = issues.iter().map(|i| i.number).collect();
+
         // 2. Create new pipelines for issues we have not seen yet.
         for issue in &issues {
             if !pipelines.contains_key(&issue.number) {
@@ -184,6 +188,11 @@ async fn main() -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
         let mut join_set = tokio::task::JoinSet::new();
 
+        // Keep a backup of every pipeline we send into a task so that if
+        // the task panics we can recover the pipeline in its pre-advance
+        // state instead of losing it entirely.
+        let mut backups: HashMap<u64, pipeline::Pipeline> = HashMap::new();
+
         let keys: Vec<u64> = pipelines.keys().copied().collect();
         for key in keys {
             if let Some(p) = pipelines.remove(&key) {
@@ -191,6 +200,7 @@ async fn main() -> Result<()> {
                     pipelines.insert(key, p);
                     continue;
                 }
+                backups.insert(key, p.clone());
                 let cfg = config.clone();
                 let sem = Arc::clone(&semaphore);
                 join_set.spawn(async move {
@@ -228,6 +238,8 @@ async fn main() -> Result<()> {
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok((key, pipeline, result)) => {
+                    // Task completed normally — remove its backup.
+                    backups.remove(&key);
                     match &result {
                         Ok(true) => info!(issue = key, "pipeline made progress"),
                         Ok(false) => {}
@@ -240,21 +252,40 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!("pipeline task panicked: {:#}", e);
+                    // The panicked task's key is unknown here, but its backup
+                    // is still in the backups map and will be recovered below.
                 }
             }
         }
 
-        // 4. Remove completed (Done) pipelines.
-        pipelines.retain(|issue, p| {
-            if p.is_done() {
-                info!(issue, "pipeline completed, removing from active set");
+        // Recover any pipelines whose tasks panicked. Their backups were
+        // never removed, so whatever remains in `backups` needs to go back.
+        for (key, backup) in backups {
+            warn!(
+                issue = key,
+                stage = ?backup.stage,
+                "recovering pipeline after task panic"
+            );
+            pipelines.insert(key, backup);
+        }
+
+        // 4. Clean up finished pipelines whose issues are no longer active
+        //    on GitHub (label removed or issue closed). Done/Failed pipelines
+        //    for issues that still carry the label are kept so they are never
+        //    re-created from scratch.
+        pipelines.retain(|issue_number, p| {
+            if (p.is_done() || p.is_failed()) && !active_on_github.contains(issue_number) {
+                info!(
+                    issue = issue_number,
+                    "pipeline finished and issue no longer active, cleaning up"
+                );
                 false
             } else {
                 true
             }
         });
 
-        // 5. Persist current state.
+        // 5. Persist current state (includes Done/Failed pipelines).
         if let Err(e) = persist_state(&pipelines, &config.runs_dir) {
             error!("failed to persist state: {:#}", e);
         }
