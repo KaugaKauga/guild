@@ -31,6 +31,7 @@ use crate::pipeline::Stage;
 #[derive(Clone, Debug)]
 pub struct PipelineSnapshot {
     pub issue_number: u64,
+    pub issue_title: String,
     pub stage: Stage,
     pub branch_name: String,
     pub pr_number: Option<u64>,
@@ -213,15 +214,17 @@ fn render_pipeline_table(
         return;
     }
 
-    let header_cells = ["#", "", "Stage", "Progress", "Status", "Branch", "PR"]
-        .iter()
-        .map(|h| {
-            Cell::from(*h).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
+    let header_cells = [
+        "#", "Issue", "", "Stage", "Progress", "Status", "Branch", "PR",
+    ]
+    .iter()
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1);
 
     let visible_pipelines: Vec<_> = state.pipelines.iter().skip(scroll_offset).collect();
@@ -248,8 +251,16 @@ fn render_pipeline_table(
             None => "—".to_string(),
         };
 
+        // Truncate long titles to keep the table readable
+        let title_display = if p.issue_title.len() > 30 {
+            format!("{}…", &p.issue_title[..29])
+        } else {
+            p.issue_title.clone()
+        };
+
         Row::new(vec![
             Cell::from(format!("#{}", p.issue_number)).style(Style::default().fg(Color::White)),
+            Cell::from(title_display).style(Style::default().fg(Color::White)),
             Cell::from(activity_indicator).style(Style::default().fg(activity_color)),
             Cell::from(stage_name).style(Style::default().fg(stage_color)),
             Cell::from(progress_bar),
@@ -263,6 +274,7 @@ fn render_pipeline_table(
         rows,
         [
             Constraint::Length(8),
+            Constraint::Length(32),
             Constraint::Length(3),
             Constraint::Length(14),
             Constraint::Length(22),
@@ -421,5 +433,47 @@ mod tests {
         assert!(bar.contains("3/8"));
         assert!(bar.contains("███"));
         assert!(bar.contains("░░░░░"));
+    }
+
+    #[test]
+    fn pipeline_snapshot_includes_issue_title() {
+        let snap = PipelineSnapshot {
+            issue_number: 42,
+            issue_title: "Fix login bug".to_string(),
+            stage: Stage::Implement,
+            branch_name: "guild/issue-42".to_string(),
+            pr_number: None,
+            status_text: "copilot running…".to_string(),
+        };
+        assert_eq!(snap.issue_title, "Fix login bug");
+        assert_eq!(snap.issue_number, 42);
+    }
+
+    #[test]
+    fn pipeline_snapshot_long_title_preserved() {
+        let long_title = "A".repeat(100);
+        let snap = PipelineSnapshot {
+            issue_number: 1,
+            issue_title: long_title.clone(),
+            stage: Stage::Plan,
+            branch_name: "guild/issue-1".to_string(),
+            pr_number: Some(10),
+            status_text: "copilot running…".to_string(),
+        };
+        assert_eq!(snap.issue_title.len(), 100);
+        assert_eq!(snap.issue_title, long_title);
+    }
+
+    #[test]
+    fn pipeline_snapshot_empty_title() {
+        let snap = PipelineSnapshot {
+            issue_number: 5,
+            issue_title: String::new(),
+            stage: Stage::Ingest,
+            branch_name: "guild/issue-5".to_string(),
+            pr_number: None,
+            status_text: "fetching issue…".to_string(),
+        };
+        assert!(snap.issue_title.is_empty());
     }
 }

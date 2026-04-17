@@ -142,14 +142,22 @@ fn run_status(runs_dir: &str) -> Result<()> {
     if pipelines.is_empty() {
         println!("No active pipelines.");
     } else {
-        println!("{:<8} {:<14} {:<12} Branch", "Issue", "Stage", "Progress");
-        println!("{}", "─".repeat(60));
+        println!(
+            "{:<8} {:<32} {:<14} {:<12} Branch",
+            "Issue", "Title", "Stage", "Progress"
+        );
+        println!("{}", "─".repeat(90));
         for p in pipelines.values() {
             let ordinal = p.stage.ordinal();
             let total = pipeline::Stage::total_stages();
+            let title = if p.issue_title.len() > 30 {
+                format!("{}…", &p.issue_title[..29])
+            } else {
+                p.issue_title.clone()
+            };
             println!(
-                "#{:<7} {:<14} {}/{:<10} {}",
-                p.issue_number, p.stage, ordinal, total, p.branch_name
+                "#{:<7} {:<32} {:<14} {}/{:<10} {}",
+                p.issue_number, title, p.stage, ordinal, total, p.branch_name
             );
         }
     }
@@ -369,6 +377,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                 .values()
                 .map(|p| PipelineSnapshot {
                     issue_number: p.issue_number,
+                    issue_title: p.issue_title.clone(),
                     stage: p.stage.clone(),
                     branch_name: p.branch_name.clone(),
                     pr_number: p.pr_number,
@@ -429,6 +438,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                                 } else {
                                     current.pipelines.push(PipelineSnapshot {
                                         issue_number: pipeline.issue_number,
+                                        issue_title: pipeline.issue_title.clone(),
                                         stage: pipeline.stage.clone(),
                                         branch_name: pipeline.branch_name.clone(),
                                         pr_number: pipeline.pr_number,
@@ -494,6 +504,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                     .values()
                     .map(|p| PipelineSnapshot {
                         issue_number: p.issue_number,
+                        issue_title: p.issue_title.clone(),
                         stage: p.stage.clone(),
                         branch_name: p.branch_name.clone(),
                         pr_number: p.pr_number,
