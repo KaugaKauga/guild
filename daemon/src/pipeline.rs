@@ -549,20 +549,34 @@ impl Pipeline {
         hasher.update(fingerprint_input.as_bytes());
         let fingerprint = hex::encode(hasher.finalize());
 
-        // Done condition: all checks green, review approved (or none), state open,
-        // and no @guild comments or change-request reviews pending.
-        let all_checks_pass = failed_checks.is_empty();
-        let review_ok = status.review_decision == "APPROVED" || status.review_decision.is_empty();
-        let state_ok = status.state == "OPEN" || status.state == "open";
-        let no_actionable = guild_comments.is_empty() && review_comments.is_empty();
-
-        if all_checks_pass && review_ok && state_ok && no_actionable {
-            info!(
-                "PR #{} is green with no actionable feedback! Marking done.",
-                pr_number
-            );
+        // Done condition: PR has been merged. The worktree is kept alive until
+        // merge so the agent can still push follow-up fixes if reviewers request
+        // changes between submission and merge.
+        let is_merged = status.state == "MERGED" || status.state == "merged";
+        if is_merged {
+            info!("PR #{} has been merged! Marking done.", pr_number);
             self.stage = Stage::Done;
             return Ok(true);
+        }
+
+        // If the PR is closed without merging, mark as failed.
+        let is_closed = status.state == "CLOSED" || status.state == "closed";
+        if is_closed {
+            info!("PR #{} was closed without merging.", pr_number);
+            self.stage = Stage::Failed("PR closed without merging".to_string());
+            return Ok(true);
+        }
+
+        // Ready condition: all checks green, review approved (or none), state open,
+        // and no @guild comments or change-request reviews pending. Nothing to do —
+        // keep watching and wait for the PR to be merged.
+        let all_checks_pass = failed_checks.is_empty();
+        let review_ok = status.review_decision == "APPROVED" || status.review_decision.is_empty();
+        let no_actionable = guild_comments.is_empty() && review_comments.is_empty();
+
+        if all_checks_pass && review_ok && no_actionable {
+            // PR is green; waiting for a human to merge it.
+            return Ok(false);
         }
 
         // Check if blocker fingerprint changed.
