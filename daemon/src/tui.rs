@@ -31,6 +31,7 @@ use crate::pipeline::Stage;
 #[derive(Clone, Debug)]
 pub struct PipelineSnapshot {
     pub issue_number: u64,
+    pub issue_title: String,
     pub stage: Stage,
     pub branch_name: String,
     pub pr_number: Option<u64>,
@@ -213,7 +214,7 @@ fn render_pipeline_table(
         return;
     }
 
-    let header_cells = ["#", "", "Stage", "Progress", "Status", "Branch", "PR"]
+    let header_cells = ["#", "Issue", "", "Stage", "Progress", "Status", "Branch", "PR"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -248,8 +249,16 @@ fn render_pipeline_table(
             None => "—".to_string(),
         };
 
+        let issue_title = if p.issue_title.chars().count() > 30 {
+            let truncated: String = p.issue_title.chars().take(30).collect();
+            format!("{}…", truncated)
+        } else {
+            p.issue_title.clone()
+        };
+
         Row::new(vec![
             Cell::from(format!("#{}", p.issue_number)).style(Style::default().fg(Color::White)),
+            Cell::from(issue_title).style(Style::default().fg(Color::White)),
             Cell::from(activity_indicator).style(Style::default().fg(activity_color)),
             Cell::from(stage_name).style(Style::default().fg(stage_color)),
             Cell::from(progress_bar),
@@ -263,11 +272,12 @@ fn render_pipeline_table(
         rows,
         [
             Constraint::Length(8),
+            Constraint::Min(20),
             Constraint::Length(3),
             Constraint::Length(14),
             Constraint::Length(22),
             Constraint::Length(20),
-            Constraint::Min(20),
+            Constraint::Min(16),
             Constraint::Length(8),
         ],
     )

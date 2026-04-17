@@ -32,6 +32,11 @@ use tracing::{error, info, warn};
 /// `copilot_plan.log` for `prompt_plan.md`.
 ///
 /// stdin is nulled out -- no interactive input.
+///
+/// The child process is started in its own session (setsid) so that it has
+/// no controlling terminal.  This prevents interactive CLI tools (e.g. Claude
+/// Code) from writing directly to /dev/tty, which would corrupt the ratatui
+/// TUI running in the parent.
 pub async fn run_copilot(
     copilot_cmd: &str,
     model: &str,
@@ -79,8 +84,8 @@ pub async fn run_copilot(
         "spawning copilot (non-interactive, yolo)"
     );
 
-    let result = tokio::process::Command::new(copilot_cmd)
-        .arg("-p")
+    let mut cmd = tokio::process::Command::new(copilot_cmd);
+    cmd.arg("-p")
         .arg(&content)
         .arg("--model")
         .arg(model)
@@ -89,8 +94,25 @@ pub async fn run_copilot(
         .current_dir(work_dir)
         .stdout(stdout_cfg)
         .stderr(stderr_cfg)
-        .stdin(Stdio::null())
-        .spawn();
+        .stdin(Stdio::null());
+
+    // Detach the child process from our controlling terminal by starting it
+    // in a new session (setsid).  Without this, CLI tools that open /dev/tty
+    // directly (e.g. for progress spinners or streaming output) will scribble
+    // over the ratatui alternate-screen buffer and corrupt the TUI.
+    //
+    // SAFETY: setsid() is async-signal-safe and does not touch memory shared
+    // with the parent.  It simply creates a new session for the child, which
+    // removes its controlling terminal.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let result = cmd.spawn();
 
     let mut child = match result {
         Ok(child) => child,

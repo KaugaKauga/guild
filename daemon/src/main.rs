@@ -278,7 +278,16 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
         });
     }
 
+    // --- persistent concurrency primitives ---------------------------------
+    // Pipeline tasks live across poll cycles.  The semaphore caps how many
+    // advance concurrently, and the JoinSet holds the running tasks.
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
+    let mut join_set = tokio::task::JoinSet::<u64>::new();
+    let mut running: HashSet<u64> = HashSet::new();
+
     // --- main loop ---------------------------------------------------------
+    // The loop only polls GitHub and spawns / reaps pipeline tasks.  It never
+    // blocks on pipeline advancement, so the poll cadence stays consistent.
     let mut cycle_count: u64 = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -296,8 +305,9 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             }
             Err(e) => {
                 error!("failed to fetch issues: {:#}", e);
-                tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)).await;
-                continue;
+                // Continue with empty list so we still reap tasks and refresh
+                // the TUI — don't stall the whole loop.
+                Vec::new()
             }
         };
 
@@ -329,15 +339,18 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             Ok(p) => p,
             Err(e) => {
                 error!("failed to load pipelines from database: {:#}", e);
-                tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)).await;
-                continue;
+                std::collections::HashMap::new()
             }
         };
 
         // 3a. Retry completing any Done pipelines left from a previous cycle.
         // 3b. Remove Failed pipelines whose issues are no longer on GitHub.
+        // Skip pipelines that currently have a running background task.
         let mut housekeeping_keys: Vec<u64> = Vec::new();
         for (&issue_number, p) in &pipelines {
+            if running.contains(&issue_number) {
+                continue; // task is still running — don't interfere
+            }
             if p.is_done() {
                 if let Err(e) = db.complete_pipeline(p) {
                     error!(issue = issue_number, "failed to complete pipeline: {:#}", e);
@@ -362,35 +375,20 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             pipelines.remove(&key);
         }
 
-        // --- Update TUI state before advancing pipelines ---
-        let now = chrono::Utc::now();
-        let _ = state_tx.send(DaemonState {
-            pipelines: pipelines
-                .values()
-                .map(|p| PipelineSnapshot {
-                    issue_number: p.issue_number,
-                    stage: p.stage.clone(),
-                    branch_name: p.branch_name.clone(),
-                    pr_number: p.pr_number,
-                    status_text: stage_status_text(&p.stage),
-                })
-                .collect(),
-            last_poll: Some(now),
-            cycle_count,
-            repo: config.repo.clone(),
-            poll_interval: config.poll_interval,
-        });
-
-        // 4. Advance active pipelines concurrently (up to max_concurrent).
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
-        let mut join_set = tokio::task::JoinSet::new();
-
+        // 4. Spawn background tasks for active pipelines that don't already
+        //    have a running task.  Each task advances its pipeline through
+        //    stages until it blocks (Watch returns Ok(false)) or errors out,
+        //    then exits.  It will be re-spawned on the next poll cycle.
         let keys: Vec<u64> = pipelines.keys().copied().collect();
         for key in keys {
+            if running.contains(&key) {
+                continue;
+            }
             if let Some(p) = pipelines.remove(&key) {
                 if p.is_done() || p.is_failed() {
                     continue;
                 }
+                running.insert(key);
                 let cfg = config.clone();
                 let sem = Arc::clone(&semaphore);
                 let db_handle = db.clone();
@@ -398,7 +396,6 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                 join_set.spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
                     let mut pipeline = p;
-                    let mut last_result = Ok(false);
                     loop {
                         match pipeline.advance(&cfg).await {
                             Ok(true) => {
@@ -415,71 +412,90 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                                     "pipeline advanced"
                                 );
 
-                                // Send a state update after each stage change
-                                // (read current state and update this pipeline's entry)
-                                let mut current = state_tx_inner.borrow().clone();
-                                if let Some(snap) = current
-                                    .pipelines
-                                    .iter_mut()
-                                    .find(|s| s.issue_number == pipeline.issue_number)
-                                {
-                                    snap.stage = pipeline.stage.clone();
-                                    snap.pr_number = pipeline.pr_number;
-                                    snap.status_text = stage_status_text(&pipeline.stage);
-                                } else {
-                                    current.pipelines.push(PipelineSnapshot {
-                                        issue_number: pipeline.issue_number,
-                                        stage: pipeline.stage.clone(),
-                                        branch_name: pipeline.branch_name.clone(),
-                                        pr_number: pipeline.pr_number,
-                                        status_text: stage_status_text(&pipeline.stage),
-                                    });
-                                }
-                                let _ = state_tx_inner.send(current);
+                                // Atomic TUI update — only touches this
+                                // pipeline's entry, cannot clobber others.
+                                state_tx_inner.send_modify(|state| {
+                                    if let Some(snap) = state
+                                        .pipelines
+                                        .iter_mut()
+                                        .find(|s| s.issue_number == pipeline.issue_number)
+                                    {
+                                        snap.stage = pipeline.stage.clone();
+                                        snap.pr_number = pipeline.pr_number;
+                                        snap.status_text =
+                                            stage_status_text(&pipeline.stage);
+                                    } else {
+                                        state.pipelines.push(PipelineSnapshot {
+                                            issue_number: pipeline.issue_number,
+                                            issue_title: pipeline.issue_title.clone(),
+                                            stage: pipeline.stage.clone(),
+                                            branch_name: pipeline.branch_name.clone(),
+                                            pr_number: pipeline.pr_number,
+                                            status_text:
+                                                stage_status_text(&pipeline.stage),
+                                        });
+                                    }
+                                });
 
-                                last_result = Ok(true);
                                 continue;
                             }
-                            Ok(false) => {
-                                last_result = Ok(last_result.unwrap_or(false));
-                                break;
-                            }
+                            Ok(false) => break,
                             Err(e) => {
-                                last_result = Err(e);
+                                tracing::error!(
+                                    issue = key,
+                                    "pipeline advance error: {:#}",
+                                    e
+                                );
                                 break;
                             }
                         }
                     }
-                    (key, pipeline, last_result)
+
+                    // Persist final state to DB.
+                    if let Err(e) = db_handle.upsert_pipeline(&pipeline) {
+                        tracing::error!(
+                            issue = key,
+                            "failed to persist pipeline final state: {:#}",
+                            e
+                        );
+                    }
+
+                    // Handle completion inside the task so the main poll
+                    // loop is never blocked by cleanup / branch deletion.
+                    if pipeline.is_done() {
+                        tracing::info!(
+                            issue = key,
+                            "pipeline completed, recording in ledger"
+                        );
+                        if let Err(e) = db_handle.complete_pipeline(&pipeline) {
+                            tracing::error!(
+                                issue = key,
+                                "failed to complete pipeline: {:#}",
+                                e
+                            );
+                        } else {
+                            github::delete_remote_branch(
+                                &pipeline.repo,
+                                &pipeline.branch_name,
+                            )
+                            .await;
+                            pipeline.cleanup_run();
+                        }
+                    }
+
+                    // Return issue number so the main loop can remove it
+                    // from the running set.
+                    key
                 });
             }
         }
 
-        // 5. Collect results.
-        while let Some(join_result) = join_set.join_next().await {
-            match join_result {
-                Ok((key, pipeline, result)) => {
-                    match &result {
-                        Ok(true) => info!(issue = key, "pipeline made progress"),
-                        Ok(false) => {}
-                        Err(e) => {
-                            error!(issue = key, "pipeline advance error: {:#}", e);
-                        }
-                    }
-                    if let Err(e) = db.upsert_pipeline(&pipeline) {
-                        error!(issue = key, "failed to persist pipeline state: {:#}", e);
-                    }
-                    if pipeline.is_done() {
-                        info!(issue = key, "pipeline completed, recording in ledger");
-                        if let Err(e) = db.complete_pipeline(&pipeline) {
-                            error!(issue = key, "failed to complete pipeline: {:#}", e);
-                        } else {
-                            // Clean up local run directory and remote branch.
-                            github::delete_remote_branch(&pipeline.repo, &pipeline.branch_name)
-                                .await;
-                            pipeline.cleanup_run();
-                        }
-                    }
+        // 5. Reap completed tasks (non-blocking).
+        while let Some(result) = join_set.try_join_next() {
+            match result {
+                Ok(key) => {
+                    running.remove(&key);
+                    info!(issue = key, "pipeline task finished");
                 }
                 Err(e) => {
                     error!("pipeline task panicked: {:#}", e);
@@ -487,27 +503,29 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             }
         }
 
-        // --- Update TUI state after advancing ---
+        // 6. Full TUI state refresh from database.
+        //    This runs every poll cycle so last_poll always tracks wall-clock
+        //    time accurately and any in-flight state races are corrected.
         if let Ok(all) = db.get_all_active_pipelines() {
-            let _ = state_tx.send(DaemonState {
-                pipelines: all
+            let now = chrono::Utc::now();
+            state_tx.send_modify(|state| {
+                state.pipelines = all
                     .values()
                     .map(|p| PipelineSnapshot {
                         issue_number: p.issue_number,
+                        issue_title: p.issue_title.clone(),
                         stage: p.stage.clone(),
                         branch_name: p.branch_name.clone(),
                         pr_number: p.pr_number,
                         status_text: stage_status_text(&p.stage),
                     })
-                    .collect(),
-                last_poll: Some(chrono::Utc::now()),
-                cycle_count,
-                repo: config.repo.clone(),
-                poll_interval: config.poll_interval,
+                    .collect();
+                state.last_poll = Some(now);
+                state.cycle_count = cycle_count;
             });
         }
 
-        // 6. Check for shutdown before sleeping.
+        // 7. Check for shutdown before sleeping.
         if shutdown.load(Ordering::SeqCst) {
             info!("shutdown flag set, breaking out of main loop");
             break;
@@ -515,6 +533,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
 
         info!(
             seconds = config.poll_interval,
+            running = running.len(),
             "sleeping until next poll cycle"
         );
         tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)).await;
@@ -523,6 +542,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     info!("guild daemon shut down cleanly");
     Ok(())
 }
+
 
 // ---------------------------------------------------------------------------
 // Orphan run directory cleanup
