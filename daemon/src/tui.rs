@@ -91,6 +91,7 @@ async fn render_loop(
     shutdown: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut scroll_offset: usize = 0;
+    let mut tick: usize = 0;
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -113,9 +114,11 @@ async fn render_loop(
                 .split(area);
 
             render_header(frame, chunks[0], &state);
-            render_pipeline_table(frame, chunks[1], &state, scroll_offset);
+            render_pipeline_table(frame, chunks[1], &state, scroll_offset, tick);
             render_footer(frame, chunks[2], &state);
         })?;
+
+        tick = tick.wrapping_add(1);
 
         // Poll for keyboard events (non-blocking with timeout)
         if event::poll(Duration::from_millis(250))? {
@@ -178,11 +181,20 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect, state: &DaemonState) {
     frame.render_widget(header, area);
 }
 
+/// Spinner frames used to indicate an active pipeline.
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Returns the spinner frame for the given tick.
+pub fn spinner_frame(tick: usize) -> &'static str {
+    SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
+}
+
 fn render_pipeline_table(
     frame: &mut ratatui::Frame,
     area: Rect,
     state: &DaemonState,
     scroll_offset: usize,
+    tick: usize,
 ) {
     if state.pipelines.is_empty() {
         let empty = Paragraph::new(Line::from(vec![Span::styled(
@@ -201,7 +213,7 @@ fn render_pipeline_table(
         return;
     }
 
-    let header_cells = ["#", "Stage", "Progress", "Status", "Branch", "PR"]
+    let header_cells = ["#", "", "Stage", "Progress", "Status", "Branch", "PR"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -219,6 +231,18 @@ fn render_pipeline_table(
         let (ordinal, total) = (p.stage.ordinal(), Stage::total_stages());
         let progress_bar = build_progress_bar(ordinal, total);
 
+        let is_active = !matches!(p.stage, Stage::Done | Stage::Failed(_));
+        let activity_indicator = if is_active {
+            spinner_frame(tick).to_string()
+        } else {
+            " ".to_string()
+        };
+        let activity_color = if is_active {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
+
         let pr_text = match p.pr_number {
             Some(n) => format!("#{}", n),
             None => "—".to_string(),
@@ -226,6 +250,7 @@ fn render_pipeline_table(
 
         Row::new(vec![
             Cell::from(format!("#{}", p.issue_number)).style(Style::default().fg(Color::White)),
+            Cell::from(activity_indicator).style(Style::default().fg(activity_color)),
             Cell::from(stage_name).style(Style::default().fg(stage_color)),
             Cell::from(progress_bar),
             Cell::from(p.status_text.clone()).style(Style::default().fg(Color::DarkGray)),
@@ -238,6 +263,7 @@ fn render_pipeline_table(
         rows,
         [
             Constraint::Length(8),
+            Constraint::Length(3),
             Constraint::Length(14),
             Constraint::Length(22),
             Constraint::Length(20),
@@ -330,4 +356,70 @@ fn build_progress_bar(current: u8, total: u8) -> String {
     let empty = (total as usize).saturating_sub(filled);
     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
     format!("{} {}/{}", bar, current, total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spinner_frame_cycles_through_all_frames() {
+        // Each tick should produce the corresponding frame
+        for (i, expected) in SPINNER_FRAMES.iter().enumerate() {
+            assert_eq!(spinner_frame(i), *expected);
+        }
+    }
+
+    #[test]
+    fn spinner_frame_wraps_around() {
+        let len = SPINNER_FRAMES.len();
+        assert_eq!(spinner_frame(0), spinner_frame(len));
+        assert_eq!(spinner_frame(1), spinner_frame(len + 1));
+        assert_eq!(spinner_frame(2), spinner_frame(len + 2));
+    }
+
+    #[test]
+    fn spinner_frame_handles_large_tick() {
+        // Should not panic on very large tick values
+        let frame = spinner_frame(usize::MAX);
+        assert!(SPINNER_FRAMES.contains(&frame));
+    }
+
+    #[test]
+    fn active_stages_show_spinner() {
+        let active_stages = vec![
+            Stage::Ingest,
+            Stage::Understand,
+            Stage::Plan,
+            Stage::Implement,
+            Stage::Verify,
+            Stage::Submit,
+            Stage::Watch,
+            Stage::Fix,
+        ];
+        for stage in active_stages {
+            assert!(
+                !matches!(stage, Stage::Done | Stage::Failed(_)),
+                "Stage {:?} should be considered active",
+                stage
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_stages_are_not_active() {
+        assert!(matches!(Stage::Done, Stage::Done | Stage::Failed(_)));
+        assert!(matches!(
+            Stage::Failed("err".into()),
+            Stage::Done | Stage::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn progress_bar_format() {
+        let bar = build_progress_bar(3, 8);
+        assert!(bar.contains("3/8"));
+        assert!(bar.contains("███"));
+        assert!(bar.contains("░░░░░"));
+    }
 }
