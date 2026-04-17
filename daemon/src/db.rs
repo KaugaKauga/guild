@@ -57,11 +57,55 @@ impl Db {
         )
         .context("failed to create database tables")?;
 
+        // --- Schema migrations ------------------------------------------------
+        // CREATE TABLE IF NOT EXISTS won't alter an existing table, so we must
+        // check for columns that were added after the initial schema and add
+        // them with ALTER TABLE if missing.
+        Self::migrate_add_column(
+            &conn,
+            "pipelines",
+            "issue_title",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        // Add future column migrations here following the same pattern.
+        // ----------------------------------------------------------------------
+
         info!(path = %path.display(), "database opened");
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Add a column to `table` if it does not already exist.
+    ///
+    /// Uses `PRAGMA table_info` to inspect the schema and only runs the
+    /// `ALTER TABLE` when the column is genuinely missing.
+    fn migrate_add_column(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        column_def: &str,
+    ) -> Result<()> {
+        let has_column: bool = {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({})", table))
+                .with_context(|| format!("failed to inspect schema for {}", table))?;
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            names.iter().any(|n| n == column)
+        };
+
+        if !has_column {
+            let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_def);
+            conn.execute(&sql, [])
+                .with_context(|| format!("failed to add column {}.{}", table, column))?;
+            info!(table, column, "migrated: added missing column");
+        }
+
+        Ok(())
     }
 
     /// Load every row from the pipelines table into a HashMap.
