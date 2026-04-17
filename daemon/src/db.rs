@@ -194,7 +194,8 @@ impl Db {
         )
         .context("failed to delete completed pipeline")?;
 
-        tx.commit().context("failed to commit completion transaction")?;
+        tx.commit()
+            .context("failed to commit completion transaction")?;
         Ok(())
     }
 

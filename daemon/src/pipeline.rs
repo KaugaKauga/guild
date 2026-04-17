@@ -28,6 +28,47 @@ pub enum Stage {
     Failed(String),
 }
 
+impl Stage {
+    /// Position of this stage in the pipeline (0-based ordinal for progress).
+    /// Failed maps to 0 since it can happen at any point.
+    pub fn ordinal(&self) -> u8 {
+        match self {
+            Stage::Ingest => 1,
+            Stage::Understand => 2,
+            Stage::Plan => 3,
+            Stage::Implement => 4,
+            Stage::Verify => 5,
+            Stage::Submit => 6,
+            Stage::Watch => 7,
+            Stage::Fix => 5, // fix loops back to roughly verify-level
+            Stage::Done => 8,
+            Stage::Failed(_) => 0,
+        }
+    }
+
+    /// Total number of stages for progress bar calculation.
+    pub fn total_stages() -> u8 {
+        8
+    }
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stage::Ingest => write!(f, "Ingest"),
+            Stage::Understand => write!(f, "Understand"),
+            Stage::Plan => write!(f, "Plan"),
+            Stage::Implement => write!(f, "Implement"),
+            Stage::Verify => write!(f, "Verify"),
+            Stage::Submit => write!(f, "Submit"),
+            Stage::Watch => write!(f, "Watch"),
+            Stage::Fix => write!(f, "Fix"),
+            Stage::Done => write!(f, "Done"),
+            Stage::Failed(msg) => write!(f, "Failed: {}", msg),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
@@ -262,9 +303,14 @@ impl Pipeline {
         let prompt_path = self.run_dir.join("prompt_plan.md");
         fs::write(&prompt_path, &prompt).context("Plan: failed to write prompt_plan.md")?;
 
-        copilot::run_copilot(&config.copilot_cmd, &config.model, &prompt_path, &self.worktree)
-            .await
-            .context("Plan: copilot run failed")?;
+        copilot::run_copilot(
+            &config.copilot_cmd,
+            &config.model,
+            &prompt_path,
+            &self.worktree,
+        )
+        .await
+        .context("Plan: copilot run failed")?;
 
         self.stage = Stage::Implement;
         Ok(true)
@@ -308,9 +354,14 @@ impl Pipeline {
         fs::write(&prompt_path, &prompt)
             .context("Implement: failed to write prompt_implement.md")?;
 
-        copilot::run_copilot(&config.copilot_cmd, &config.model, &prompt_path, &self.worktree)
-            .await
-            .context("Implement: copilot run failed")?;
+        copilot::run_copilot(
+            &config.copilot_cmd,
+            &config.model,
+            &prompt_path,
+            &self.worktree,
+        )
+        .await
+        .context("Implement: copilot run failed")?;
 
         self.stage = Stage::Verify;
         Ok(true)
@@ -335,9 +386,14 @@ impl Pipeline {
         let prompt_path = self.run_dir.join("prompt_verify.md");
         fs::write(&prompt_path, &prompt).context("Verify: failed to write prompt_verify.md")?;
 
-        copilot::run_copilot(&config.copilot_cmd, &config.model, &prompt_path, &self.worktree)
-            .await
-            .context("Verify: copilot run failed")?;
+        copilot::run_copilot(
+            &config.copilot_cmd,
+            &config.model,
+            &prompt_path,
+            &self.worktree,
+        )
+        .await
+        .context("Verify: copilot run failed")?;
 
         self.stage = Stage::Submit;
         Ok(true)
@@ -360,7 +416,10 @@ impl Pipeline {
             .await
             .context("Submit: failed to check for existing PR")?
         {
-            info!("PR #{} already exists for branch {}, reusing", existing, self.branch_name);
+            info!(
+                "PR #{} already exists for branch {}, reusing",
+                existing, self.branch_name
+            );
             self.pr_number = Some(existing);
         } else {
             let pr_title = format!("guild: issue #{}", self.issue_number);
@@ -563,9 +622,14 @@ impl Pipeline {
         let prompt_path = self.run_dir.join("prompt_fix.md");
         fs::write(&prompt_path, &prompt).context("Fix: failed to write prompt_fix.md")?;
 
-        copilot::run_copilot(&config.copilot_cmd, &config.model, &prompt_path, &self.worktree)
-            .await
-            .context("Fix: copilot run failed")?;
+        copilot::run_copilot(
+            &config.copilot_cmd,
+            &config.model,
+            &prompt_path,
+            &self.worktree,
+        )
+        .await
+        .context("Fix: copilot run failed")?;
 
         github::commit_all(&self.worktree, "guild: fix blockers")
             .await

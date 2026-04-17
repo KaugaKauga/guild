@@ -273,9 +273,12 @@ pub async fn commit_all(worktree: &Path, message: &str) -> Result<()> {
 
 /// Push  to origin, setting upstream tracking.
 pub async fn push_branch(worktree: &Path, branch: &str) -> Result<()> {
-    run_git(&["push", "--force-with-lease", "-u", "origin", branch], worktree)
-        .await
-        .context("push_branch")?;
+    run_git(
+        &["push", "--force-with-lease", "-u", "origin", branch],
+        worktree,
+    )
+    .await
+    .context("push_branch")?;
     Ok(())
 }
 
@@ -311,11 +314,7 @@ pub async fn create_draft_pr(
 /// Returns `Some(pr_number)` if one exists, `None` otherwise.
 pub async fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<u64>> {
     let json = run_gh(&[
-        "pr", "list",
-        "--repo", repo,
-        "--head", branch,
-        "--json", "number",
-        "--limit", "1",
+        "pr", "list", "--repo", repo, "--head", branch, "--json", "number", "--limit", "1",
     ])
     .await
     .context("find_pr_for_branch")?;
