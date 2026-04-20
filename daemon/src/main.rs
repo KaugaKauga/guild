@@ -164,16 +164,25 @@ fn run_status(runs_dir: &str) -> Result<()> {
     }
     Ok(())
 }
-
 // ---------------------------------------------------------------------------
 // `guild start` — main daemon with TUI
 // ---------------------------------------------------------------------------
 
-/// Generate a brief status description for the TUI based on the pipeline stage.
-fn stage_status_text(stage: &pipeline::Stage) -> String {
+/// Generate a brief status description for the TUI based on the pipeline
+/// stage and whether an agent task is currently running for it.
+fn stage_status_text(stage: &pipeline::Stage, has_running_task: bool) -> String {
     use pipeline::Stage;
+    if has_running_task && stage.needs_agent() {
+        return "copilot running…".into();
+    }
     match stage {
-        Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix => "copilot running…".into(),
+        Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix => {
+            if has_running_task {
+                "copilot running…".into()
+            } else {
+                "waiting for slot…".into()
+            }
+        }
         Stage::Ingest => "fetching issue…".into(),
         Stage::Understand => "analyzing…".into(),
         Stage::Submit => "pushing PR…".into(),
@@ -193,8 +202,6 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     })?;
 
     // --- tracing -----------------------------------------------------------
-    // When TUI is active, log to a file so we don't corrupt the terminal.
-    // When TUI is disabled (--no-tui), log to stderr as before.
     if no_tui {
         tracing_subscriber::fmt()
             .with_env_filter(
@@ -223,7 +230,6 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     // --- print banner (before TUI takes over the screen) -------------------
     if !no_tui {
         banner::print_banner();
-        // Brief pause so the user can admire the art
         println!("  Starting daemon for {}...\n", config.repo);
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -251,8 +257,6 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     drop(existing);
 
     // --- clean up orphaned run directories --------------------------------
-    // Scan runs_dir for subdirectories not tracked by any active or completed
-    // pipeline.  These may have been left behind by crashes or interrupted runs.
     cleanup_orphan_run_dirs(&config.runs_dir, &db);
 
     // --- graceful shutdown flag --------------------------------------------
@@ -287,16 +291,19 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
         });
     }
 
-    // --- persistent concurrency primitives ---------------------------------
-    // Pipeline tasks live across poll cycles.  The semaphore caps how many
-    // advance concurrently, and the JoinSet holds the running tasks.
+    // --- concurrency primitives --------------------------------------------
+    // The semaphore only gates copilot (agent) tasks.  Orchestrator stages
+    // (Ingest, Understand, Submit, Watch) run without a permit.
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
-    let mut join_set = tokio::task::JoinSet::<u64>::new();
+
+    // JoinSet for background tasks.  Each task does exactly ONE stage and
+    // exits, returning its issue number so the orchestrator can advance it.
+    let mut join_set = tokio::task::JoinSet::<(u64, std::result::Result<bool, String>)>::new();
+
+    // Set of issue numbers that currently have a spawned task in the JoinSet.
     let mut running: HashSet<u64> = HashSet::new();
 
-    // --- main loop ---------------------------------------------------------
-    // The loop only polls GitHub and spawns / reaps pipeline tasks.  It never
-    // blocks on pipeline advancement, so the poll cadence stays consistent.
+    // --- main orchestrator loop --------------------------------------------
     let mut cycle_count: u64 = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -306,7 +313,36 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
 
         cycle_count += 1;
 
-        // 1. Fetch open issues that carry the target label.
+        // -- 1. Reap completed tasks (before anything else) -----------------
+        // Tasks that finished since the last tick get processed first so
+        // the orchestrator has an up-to-date picture of what is running.
+        while let Some(result) = join_set.try_join_next() {
+            match result {
+                Ok((issue_number, task_result)) => {
+                    running.remove(&issue_number);
+                    match task_result {
+                        Ok(true) => {
+                            info!(issue = issue_number, "task completed, stage advanced");
+                        }
+                        Ok(false) => {
+                            info!(issue = issue_number, "task completed, no progress");
+                        }
+                        Err(ref msg) => {
+                            error!(issue = issue_number, "task failed: {}", msg);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Task panicked.  We lost the issue number.
+                    // The pipeline is still in the DB and will be retried
+                    // next cycle (it won't be in `running` because the
+                    // JoinSet entry is gone).
+                    error!("pipeline task panicked: {:#}", e);
+                }
+            }
+        }
+
+        // -- 2. Fetch open issues with the target label ---------------------
         let issues = match github::fetch_labeled_issues(&config.repo, &config.label).await {
             Ok(issues) => {
                 info!(count = issues.len(), "fetched labeled issues");
@@ -314,15 +350,13 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             }
             Err(e) => {
                 error!("failed to fetch issues: {:#}", e);
-                // Continue with empty list so we still reap tasks and refresh
-                // the TUI — don't stall the whole loop.
                 Vec::new()
             }
         };
 
         let active_on_github: HashSet<u64> = issues.iter().map(|i| i.number).collect();
 
-        // 2. Create pipelines for issues we have not seen before.
+        // -- 3. Create pipelines for new issues -----------------------------
         for issue in &issues {
             let already_known = db.has_pipeline(issue.number).unwrap_or(false)
                 || db.is_completed(issue.number).unwrap_or(false);
@@ -330,20 +364,14 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                 continue;
             }
 
-            info!(
-                issue = issue.number,
-                "new issue detected, creating pipeline"
-            );
+            info!(issue = issue.number, "new issue detected, creating pipeline");
             let p = pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir);
             if let Err(e) = db.upsert_pipeline(&p) {
-                error!(
-                    issue = issue.number,
-                    "failed to persist new pipeline: {:#}", e
-                );
+                error!(issue = issue.number, "failed to persist new pipeline: {:#}", e);
             }
         }
 
-        // 3. Load all active pipelines from the database.
+        // -- 4. Load all active pipelines from the database -----------------
         let mut pipelines = match db.get_all_active_pipelines() {
             Ok(p) => p,
             Err(e) => {
@@ -352,27 +380,41 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             }
         };
 
-        // 3a. Retry completing any Done pipelines left from a previous cycle.
-        // 3b. Remove Failed pipelines whose issues are no longer on GitHub.
-        // Skip pipelines that currently have a running background task.
+        // -- 5. Housekeeping: complete Done, remove stale Failed ------------
         let mut housekeeping_keys: Vec<u64> = Vec::new();
         for (&issue_number, p) in &pipelines {
             if running.contains(&issue_number) {
-                continue; // task is still running — don't interfere
+                continue;
             }
             if p.is_done() {
                 if let Err(e) = db.complete_pipeline(p) {
                     error!(issue = issue_number, "failed to complete pipeline: {:#}", e);
                 } else {
                     info!(issue = issue_number, "completed pipeline moved to ledger");
-                    p.cleanup_run();
+                    // Spawn a lightweight task for cleanup so we don't block
+                    // the orchestrator on branch deletion / disk I/O.
+                    let repo = p.repo.clone();
+                    let branch = p.branch_name.clone();
+                    let worktree = p.worktree.clone();
+                    let run_dir = p.run_dir.clone();
+                    let inum = p.issue_number;
+                    tokio::spawn(async move {
+                        github::delete_remote_branch(&repo, &branch).await;
+                        if worktree.exists() {
+                            if let Err(e) = std::fs::remove_dir_all(&worktree) {
+                                tracing::warn!(issue = inum, "cleanup: remove worktree: {:#}", e);
+                            }
+                        }
+                        if run_dir.exists() {
+                            if let Err(e) = std::fs::remove_dir_all(&run_dir) {
+                                tracing::warn!(issue = inum, "cleanup: remove run_dir: {:#}", e);
+                            }
+                        }
+                    });
                     housekeeping_keys.push(issue_number);
                 }
             } else if p.is_failed() && !active_on_github.contains(&issue_number) {
-                info!(
-                    issue = issue_number,
-                    "removing failed pipeline for inactive issue"
-                );
+                info!(issue = issue_number, "removing failed pipeline for inactive issue");
                 if let Err(e) = db.remove_pipeline(issue_number) {
                     error!(issue = issue_number, "failed to remove pipeline: {:#}", e);
                 } else {
@@ -384,121 +426,148 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             pipelines.remove(&key);
         }
 
-        // 4. Spawn background tasks for active pipelines that don't already
-        //    have a running task.  Each task advances its pipeline through
-        //    stages until it blocks (Watch returns Ok(false)) or errors out,
-        //    then exits.  It will be re-spawned on the next poll cycle.
+        // -- 6. Process each active pipeline --------------------------------
+        // The orchestrator owns every stage transition.  For orchestrator
+        // stages (Ingest, Understand, Submit) we spawn a short-lived task
+        // without a semaphore permit.  Watch is handled inline (quick GH
+        // API call each tick).  For agent stages (Plan, Implement, Verify,
+        // Fix) we spawn a copilot task gated by the semaphore.
+        // Each task does exactly ONE stage and exits.
         let keys: Vec<u64> = pipelines.keys().copied().collect();
         for key in keys {
             if running.contains(&key) {
                 continue;
             }
-            if let Some(p) = pipelines.remove(&key) {
-                if p.is_done() || p.is_failed() {
-                    continue;
+
+            let p = match pipelines.remove(&key) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            if p.is_done() || p.is_failed() {
+                continue;
+            }
+
+            match &p.stage {
+                // -- Watch: handled inline by the orchestrator ---------------
+                // This is the critical fix.  Watch is a quick GH API call
+                // done every tick.  No task, no semaphore, no inner loop.
+                pipeline::Stage::Watch => {
+                    let mut p = p;
+                    match p.do_watch().await {
+                        Ok(true) => {
+                            // Stage changed (Fix, Done, or Failed).
+                            if let Err(e) = db.upsert_pipeline(&p) {
+                                error!(issue = key, "failed to persist Watch transition: {:#}", e);
+                            }
+                            info!(issue = key, stage = %p.stage, "Watch: stage transitioned");
+                        }
+                        Ok(false) => {
+                            // No change.  Persist so the fingerprint is saved.
+                            if let Err(e) = db.upsert_pipeline(&p) {
+                                error!(issue = key, "failed to persist Watch state: {:#}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!(issue = key, "Watch check failed: {:#}", e);
+                        }
+                    }
                 }
-                running.insert(key);
-                let cfg = config.clone();
-                let sem = Arc::clone(&semaphore);
-                let db_handle = db.clone();
-                let state_tx_inner = state_tx.clone();
-                join_set.spawn(async move {
-                    let _permit = sem.acquire().await.expect("semaphore closed");
-                    let mut pipeline = p;
-                    loop {
-                        match pipeline.advance(&cfg).await {
-                            Ok(true) => {
-                                if let Err(e) = db_handle.upsert_pipeline(&pipeline) {
-                                    tracing::error!(
-                                        issue = key,
-                                        "failed to persist pipeline after advance: {:#}",
-                                        e
-                                    );
-                                }
-                                tracing::info!(
+
+                // -- Agent stages: spawn copilot task with semaphore ---------
+                pipeline::Stage::Plan
+                | pipeline::Stage::Implement
+                | pipeline::Stage::Verify
+                | pipeline::Stage::Fix => {
+                    running.insert(key);
+                    let cfg = config.clone();
+                    let sem = Arc::clone(&semaphore);
+                    let db_handle = db.clone();
+                    join_set.spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let mut pipeline = p;
+                        let stage_name = format!("{}", pipeline.stage);
+                        info!(issue = key, stage = %stage_name, "agent task started");
+
+                        let result = pipeline.advance(&cfg).await;
+
+                        // Always persist state to DB, even on error.
+                        if let Err(e) = db_handle.upsert_pipeline(&pipeline) {
+                            tracing::error!(
+                                issue = key,
+                                "failed to persist pipeline after {}: {:#}",
+                                stage_name, e
+                            );
+                        }
+
+                        match result {
+                            Ok(advanced) => {
+                                info!(
                                     issue = key,
                                     stage = %pipeline.stage,
-                                    "pipeline advanced"
+                                    advanced,
+                                    "agent task finished"
                                 );
-
-                                // Atomic TUI update — only touches this
-                                // pipeline's entry, cannot clobber others.
-                                state_tx_inner.send_modify(|state| {
-                                    if let Some(snap) = state
-                                        .pipelines
-                                        .iter_mut()
-                                        .find(|s| s.issue_number == pipeline.issue_number)
-                                    {
-                                        snap.stage = pipeline.stage.clone();
-                                        snap.pr_number = pipeline.pr_number;
-                                        snap.status_text = stage_status_text(&pipeline.stage);
-                                    } else {
-                                        state.pipelines.push(PipelineSnapshot {
-                                            issue_number: pipeline.issue_number,
-                                            issue_title: pipeline.issue_title.clone(),
-                                            stage: pipeline.stage.clone(),
-                                            branch_name: pipeline.branch_name.clone(),
-                                            pr_number: pipeline.pr_number,
-                                            status_text: stage_status_text(&pipeline.stage),
-                                        });
-                                    }
-                                });
-
-                                continue;
+                                (key, Ok(advanced))
                             }
-                            Ok(false) => break,
                             Err(e) => {
-                                tracing::error!(issue = key, "pipeline advance error: {:#}", e);
-                                break;
+                                let msg = format!("{} failed: {:#}", stage_name, e);
+                                error!(issue = key, "{}", msg);
+                                (key, Err(msg))
                             }
                         }
-                    }
+                    });
+                }
 
-                    // Persist final state to DB.
-                    if let Err(e) = db_handle.upsert_pipeline(&pipeline) {
-                        tracing::error!(
-                            issue = key,
-                            "failed to persist pipeline final state: {:#}",
-                            e
-                        );
-                    }
+                // -- Orchestrator stages: spawn lightweight task -------------
+                // No semaphore needed — these don't run copilot.
+                pipeline::Stage::Ingest
+                | pipeline::Stage::Understand
+                | pipeline::Stage::Submit => {
+                    running.insert(key);
+                    let cfg = config.clone();
+                    let db_handle = db.clone();
+                    join_set.spawn(async move {
+                        let mut pipeline = p;
+                        let stage_name = format!("{}", pipeline.stage);
 
-                    // Handle completion inside the task so the main poll
-                    // loop is never blocked by cleanup / branch deletion.
-                    if pipeline.is_done() {
-                        tracing::info!(issue = key, "pipeline completed, recording in ledger");
-                        if let Err(e) = db_handle.complete_pipeline(&pipeline) {
-                            tracing::error!(issue = key, "failed to complete pipeline: {:#}", e);
-                        } else {
-                            github::delete_remote_branch(&pipeline.repo, &pipeline.branch_name)
-                                .await;
-                            pipeline.cleanup_run();
+                        let result = pipeline.advance(&cfg).await;
+
+                        if let Err(e) = db_handle.upsert_pipeline(&pipeline) {
+                            tracing::error!(
+                                issue = key,
+                                "failed to persist pipeline after {}: {:#}",
+                                stage_name, e
+                            );
                         }
-                    }
 
-                    // Return issue number so the main loop can remove it
-                    // from the running set.
-                    key
-                });
+                        match result {
+                            Ok(advanced) => {
+                                info!(
+                                    issue = key,
+                                    stage = %pipeline.stage,
+                                    advanced,
+                                    "orchestrator task finished"
+                                );
+                                (key, Ok(advanced))
+                            }
+                            Err(e) => {
+                                let msg = format!("{} failed: {:#}", stage_name, e);
+                                error!(issue = key, "{}", msg);
+                                (key, Err(msg))
+                            }
+                        }
+                    });
+                }
+
+                // Done/Failed already handled in housekeeping above.
+                pipeline::Stage::Done | pipeline::Stage::Failed(_) => {}
             }
         }
 
-        // 5. Reap completed tasks (non-blocking).
-        while let Some(result) = join_set.try_join_next() {
-            match result {
-                Ok(key) => {
-                    running.remove(&key);
-                    info!(issue = key, "pipeline task finished");
-                }
-                Err(e) => {
-                    error!("pipeline task panicked: {:#}", e);
-                }
-            }
-        }
-
-        // 6. Full TUI state refresh from database.
-        //    This runs every poll cycle so last_poll always tracks wall-clock
-        //    time accurately and any in-flight state races are corrected.
+        // -- 7. TUI refresh from database (single source of truth) ----------
+        // Only the orchestrator writes to the TUI state channel.
+        // No tasks touch this — eliminates the race condition.
         if let Ok(all) = db.get_all_active_pipelines() {
             let now = chrono::Utc::now();
             state_tx.send_modify(|state| {
@@ -510,7 +579,10 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                         stage: p.stage.clone(),
                         branch_name: p.branch_name.clone(),
                         pr_number: p.pr_number,
-                        status_text: stage_status_text(&p.stage),
+                        status_text: stage_status_text(
+                            &p.stage,
+                            running.contains(&p.issue_number),
+                        ),
                     })
                     .collect();
                 state.last_poll = Some(now);
@@ -518,7 +590,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             });
         }
 
-        // 7. Check for shutdown before sleeping.
+        // -- 8. Check for shutdown before sleeping --------------------------
         if shutdown.load(Ordering::SeqCst) {
             info!("shutdown flag set, breaking out of main loop");
             break;
@@ -535,17 +607,6 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     info!("guild daemon shut down cleanly");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Orphan run directory cleanup
-// ---------------------------------------------------------------------------
-
-/// Remove run directories inside `runs_dir` that are not referenced by any
-/// active or completed pipeline in the database.
-///
-/// Skips files (e.g. guild.db, guild.log) and only considers directories whose
-/// names look like guild run dirs (contain a `-` to match the timestamp-slug
-/// pattern).
 fn cleanup_orphan_run_dirs(runs_dir: &std::path::Path, db: &db::Db) {
     let tracked = match db.all_tracked_run_dirs() {
         Ok(t) => t,

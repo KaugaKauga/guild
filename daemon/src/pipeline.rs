@@ -50,6 +50,12 @@ impl Stage {
     pub fn total_stages() -> u8 {
         8
     }
+
+    /// Returns true if this stage requires a copilot agent to run.
+    /// These stages acquire a semaphore permit in the orchestrator.
+    pub fn needs_agent(&self) -> bool {
+        matches!(self, Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix)
+    }
 }
 
 impl std::fmt::Display for Stage {
@@ -153,6 +159,7 @@ impl Pipeline {
     ///
     /// Called after the pipeline has been recorded in the completed ledger.
     /// Errors are logged but not propagated -- cleanup is best-effort.
+    #[allow(dead_code)]
     pub fn cleanup_run(&self) {
         // Remove worktree first (may be a large clone).
         if self.worktree.exists() {
@@ -193,7 +200,7 @@ impl Pipeline {
     // Stage implementations
     // ------------------------------------------------------------------
 
-    async fn do_ingest(&mut self) -> Result<bool> {
+    pub async fn do_ingest(&mut self) -> Result<bool> {
         let issue = github::fetch_issue_detail(&self.repo, self.issue_number)
             .await
             .context("Ingest: failed to fetch issue detail")?;
@@ -223,7 +230,7 @@ impl Pipeline {
         Ok(true)
     }
 
-    async fn do_understand(&mut self) -> Result<bool> {
+    pub async fn do_understand(&mut self) -> Result<bool> {
         // Clean up stale git lock files that may have been left by a killed process.
         let git_lock = self.worktree.join(".git/index.lock");
         if git_lock.exists() {
@@ -319,7 +326,7 @@ impl Pipeline {
         Ok(true)
     }
 
-    async fn do_plan(&mut self, config: &Config) -> Result<bool> {
+    pub async fn do_plan(&mut self, config: &Config) -> Result<bool> {
         let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
         let repo_summary = read_file_or(&self.run_dir.join("repo_summary.md"), "(no repo summary)");
 
@@ -368,7 +375,7 @@ impl Pipeline {
         Ok(true)
     }
 
-    async fn do_implement(&mut self, config: &Config) -> Result<bool> {
+    pub async fn do_implement(&mut self, config: &Config) -> Result<bool> {
         let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
         let plan = read_file_or(
             &self.run_dir.join("plan.md"),
@@ -428,7 +435,7 @@ impl Pipeline {
         Ok(true)
     }
 
-    async fn do_verify(&mut self, config: &Config) -> Result<bool> {
+    pub async fn do_verify(&mut self, config: &Config) -> Result<bool> {
         let prompt = format!(
             "You are an autonomous coding agent in the VERIFY stage.\n\
              \n\
@@ -461,7 +468,7 @@ impl Pipeline {
         Ok(true)
     }
 
-    async fn do_submit(&mut self) -> Result<bool> {
+    pub async fn do_submit(&mut self) -> Result<bool> {
         // Clean up stale git lock file from a potentially killed process.
         let git_lock = self.worktree.join(".git/index.lock");
         if git_lock.exists() {
@@ -521,7 +528,7 @@ impl Pipeline {
         Ok(true)
     }
 
-    async fn do_watch(&mut self) -> Result<bool> {
+    pub async fn do_watch(&mut self) -> Result<bool> {
         let pr_number = self
             .pr_number
             .ok_or_else(|| anyhow::anyhow!("Watch: no PR number set"))?;
@@ -609,13 +616,24 @@ impl Pipeline {
             return Ok(true);
         }
 
+        // Determine whether there are actual actionable blockers.
+        let has_blockers = !failed_checks.is_empty()
+            || !review_comments.is_empty()
+            || !guild_comments.is_empty();
+
         // Check if blocker fingerprint changed.
         let changed = match &self.blocker_fingerprint {
             Some(prev) => prev != &fingerprint,
-            None => true,
+            None => {
+                // First time in Watch — store baseline fingerprint.
+                // Don't transition to Fix; wait for an actual change.
+                self.blocker_fingerprint = Some(fingerprint);
+                info!("Watch: baseline fingerprint stored for PR #{}", pr_number);
+                return Ok(false);
+            }
         };
 
-        if changed {
+        if changed && has_blockers {
             self.blocker_fingerprint = Some(fingerprint);
 
             // Write blocker report.
@@ -669,11 +687,17 @@ impl Pipeline {
             return Ok(true);
         }
 
+        // Fingerprint changed but no actionable blockers — just update baseline.
+        if changed {
+            self.blocker_fingerprint = Some(fingerprint);
+            info!("Watch: fingerprint updated for PR #{} (no actionable blockers)", pr_number);
+        }
+
         // No change -- will check again next poll.
         Ok(false)
     }
 
-    async fn do_fix(&mut self, config: &Config) -> Result<bool> {
+    pub async fn do_fix(&mut self, config: &Config) -> Result<bool> {
         // Clean up stale git lock file from a potentially killed process.
         let git_lock = self.worktree.join(".git/index.lock");
         if git_lock.exists() {
