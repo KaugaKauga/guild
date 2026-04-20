@@ -32,13 +32,13 @@ INGEST ─▶ UNDERSTAND ─▶ PLAN ─▶ IMPLEMENT ─▶ VERIFY ─▶ SUBMI
 | Stage | Who runs it | What happens |
 |-------|-------------|--------------|
 | **INGEST** | Daemon | Fetches the issue body, metadata, comments, and linked issues via `gh`. Saves everything as JSON + markdown into the run directory. |
-| **UNDERSTAND** | Daemon | Shallow-clones the repo. Scans for CI workflows, contributing docs, dependency manifests. Builds a directory tree. Creates a working branch (`guild/issue-{N}`). |
+| **UNDERSTAND** | Daemon | Shallow-clones the repo. Scans for CI workflows, contributing docs, dependency manifests. Reads `.guild/learnings.md` for repo-specific agent knowledge. Builds a directory tree. Creates a working branch (`guild/issue-{N}`). |
 | **PLAN** | Copilot | Reads the issue + repo summary. Produces `plan.md` — which files to touch, what tests to write, what UI wiring is needed. |
-| **IMPLEMENT** | Copilot | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. |
+| **IMPLEMENT** | Copilot | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. Appends any repo-specific learnings to `.guild/learnings.md`. |
 | **VERIFY** | Copilot | Runs linting and basic checks. Fixes lint errors. Does **not** run full test suites that might hang (watch mode, browser tests). Trusts CI for that. |
 | **SUBMIT** | Daemon | Commits all changes, pushes the branch, opens a **draft** pull request. Never marks it ready. |
 | **WATCH** | Daemon | Polls the PR every cycle. Computes a "blocker fingerprint" from: failed CI checks, review decision, mergeable state, and `@guild` comment mentions. When the fingerprint changes, enters FIX. |
-| **FIX** | Copilot | Reads the blocker report (failed checks, review comments, `@guild` mentions). Fixes the code. Daemon commits and pushes. Returns to WATCH. |
+| **FIX** | Copilot | Reads the blocker report (failed checks, review comments, `@guild` mentions). Fixes the code. Appends any learnings to `.guild/learnings.md`. Daemon commits and pushes. Returns to WATCH. |
 | **DONE** | Daemon | All checks green, review approved (or none), no `@guild` comments pending. Pipeline complete. |
 
 ### The WATCH ↔ FIX loop
@@ -131,7 +131,7 @@ guild/
       pipeline.rs             # Per-issue state machine (the 9 stages)
       copilot.rs              # Spawns copilot with: -p <prompt> --yolo --no-ask-user
     Cargo.toml
-  prompts/                    # Reference prompt templates (per-stage)
+  agents/                     # Agent prompt templates (per-stage)
     plan.md
     implement.md
     verify.md
@@ -146,6 +146,7 @@ guild/
       plan.md                 # Copilot's implementation plan
       verify_report.md        # Lint/check results
       blocker_report.md       # What's blocking the PR
+      learnings.md            # Repo-specific learnings (copied from worktree)
       prompt_*.md             # Generated prompts for each stage
       worktree/               # Shallow clone of the repo (working branch)
 ```
@@ -187,6 +188,19 @@ ask clarifying questions.
 The daemon makes **zero** implementation decisions. It only decides *when* to invoke
 Copilot and *what context* to provide. All intelligence — what code to write, how to
 fix a test, how to address a review comment — lives in the Copilot process.
+
+### Repo learnings
+
+Guild maintains a lightweight feedback loop via `.guild/learnings.md` in the target
+repository. During the **UNDERSTAND** stage, the daemon reads this file (if it exists)
+and injects its contents into every agent prompt (PLAN, IMPLEMENT, FIX). This gives
+agents repo-specific context — build quirks, naming conventions, test patterns, common
+gotchas — without requiring human curation.
+
+At the end of **IMPLEMENT** and **FIX**, agents are instructed to reflect on anything
+non-obvious they discovered and append it to `.guild/learnings.md`. The file is
+committed alongside the rest of the code changes, so learnings accumulate over time
+and are available to future Guild runs on the same repo.
 
 ## Design principles
 
