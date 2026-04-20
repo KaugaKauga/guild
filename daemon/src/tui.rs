@@ -267,7 +267,8 @@ fn render_pipeline_table(
             Cell::from(p.status_text.clone()).style(Style::default().fg(Color::DarkGray)),
             Cell::from(p.branch_name.clone()).style(Style::default().fg(Color::Blue)),
             Cell::from(pr_text).style(Style::default().fg(Color::Magenta)),
-        ]).bottom_margin(1)
+        ])
+        .bottom_margin(1)
     });
 
     let table = Table::new(
