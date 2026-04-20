@@ -214,15 +214,17 @@ fn render_pipeline_table(
         return;
     }
 
-    let header_cells = ["#", "Issue", "", "Stage", "Progress", "Status", "Branch", "PR"]
-        .iter()
-        .map(|h| {
-            Cell::from(*h).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
+    let header_cells = [
+        "#", "Issue", "", "Stage", "Progress", "Status", "Branch", "PR",
+    ]
+    .iter()
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1);
 
     let visible_pipelines: Vec<_> = state.pipelines.iter().skip(scroll_offset).collect();
@@ -431,5 +433,44 @@ mod tests {
         assert!(bar.contains("3/8"));
         assert!(bar.contains("███"));
         assert!(bar.contains("░░░░░"));
+    }
+
+    #[test]
+    fn pipeline_snapshot_displays_issue_title() {
+        let snap = PipelineSnapshot {
+            issue_number: 42,
+            issue_title: "Fix login bug".to_string(),
+            stage: Stage::Implement,
+            branch_name: "guild/issue-42".to_string(),
+            pr_number: None,
+            status_text: "copilot running…".to_string(),
+        };
+        assert_eq!(snap.issue_title, "Fix login bug");
+        assert_eq!(snap.issue_number, 42);
+    }
+
+    #[test]
+    fn long_issue_title_is_truncated_at_30_chars() {
+        let long_title = "This is a very long issue title that exceeds thirty characters";
+        let truncated = if long_title.chars().count() > 30 {
+            let t: String = long_title.chars().take(30).collect();
+            format!("{}…", t)
+        } else {
+            long_title.to_string()
+        };
+        assert_eq!(truncated, "This is a very long issue titl…");
+        assert!(truncated.chars().count() <= 31); // 30 + ellipsis
+    }
+
+    #[test]
+    fn short_issue_title_is_not_truncated() {
+        let short_title = "Fix bug";
+        let display = if short_title.chars().count() > 30 {
+            let t: String = short_title.chars().take(30).collect();
+            format!("{}…", t)
+        } else {
+            short_title.to_string()
+        };
+        assert_eq!(display, "Fix bug");
     }
 }

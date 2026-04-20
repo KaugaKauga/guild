@@ -91,7 +91,7 @@ impl Pipeline {
     ///
     /// A run directory is created under `runs_dir` with the pattern
     /// `{timestamp}-{repo_slug}-{issue_number}`.
-    pub fn new(issue_number: u64, repo: String, runs_dir: &Path) -> Self {
+    pub fn new(issue_number: u64, repo: String, runs_dir: &Path, issue_title: &str) -> Self {
         let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let repo_slug = repo.replace('/', "-");
         let dir_name = format!("{}-{}-{}", timestamp, repo_slug, issue_number);
@@ -110,7 +110,7 @@ impl Pipeline {
             pr_number: None,
             blocker_fingerprint: None,
             branch_name,
-            issue_title: String::new(),
+            issue_title: issue_title.to_string(),
         }
     }
 
@@ -923,4 +923,53 @@ fn scan_known_files(base: &Path, names: &[&str]) -> Vec<String> {
         .filter(|name| base.join(name).exists())
         .map(|name| name.to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn pipeline_new_stores_issue_title() {
+        let tmp = tempdir();
+        let p = Pipeline::new(42, "owner/repo".to_string(), &tmp, "Fix login bug");
+        assert_eq!(p.issue_title, "Fix login bug");
+        assert_eq!(p.issue_number, 42);
+    }
+
+    #[test]
+    fn pipeline_new_with_empty_title() {
+        let tmp = tempdir();
+        let p = Pipeline::new(7, "owner/repo".to_string(), &tmp, "");
+        assert_eq!(p.issue_title, "");
+    }
+
+    #[test]
+    fn pipeline_new_creates_branch_name() {
+        let tmp = tempdir();
+        let p = Pipeline::new(99, "owner/repo".to_string(), &tmp, "Some title");
+        assert_eq!(p.branch_name, "guild/issue-99");
+    }
+
+    #[test]
+    fn pipeline_new_starts_at_ingest() {
+        let tmp = tempdir();
+        let p = Pipeline::new(1, "owner/repo".to_string(), &tmp, "Title");
+        assert_eq!(p.stage, Stage::Ingest);
+    }
+
+    #[test]
+    fn pipeline_new_creates_run_dir() {
+        let tmp = tempdir();
+        let p = Pipeline::new(1, "owner/repo".to_string(), &tmp, "Title");
+        assert!(p.run_dir.exists());
+    }
+
+    /// Helper: create a temporary directory for tests.
+    fn tempdir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("guild-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 }
