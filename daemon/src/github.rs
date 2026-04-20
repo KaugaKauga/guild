@@ -330,30 +330,24 @@ pub async fn push_branch(worktree: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create a draft pull request and return its number.
-pub async fn create_draft_pr(
-    repo: &str,
-    base: &str,
-    head: &str,
-    title: &str,
-    body: &str,
-) -> Result<u64> {
+/// Create a pull request and return its number.
+pub async fn create_pr(repo: &str, base: &str, head: &str, title: &str, body: &str) -> Result<u64> {
     // gh pr create prints the PR URL to stdout (e.g. https://github.com/owner/repo/pull/42)
     let url = run_gh(&[
         "pr", "create", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body",
-        body, "--draft",
+        body,
     ])
     .await
-    .context("create_draft_pr")?;
+    .context("create_pr")?;
 
     // Parse the PR number from the URL: last path segment.
     let url = url.trim();
     let pr_number: u64 = url
         .rsplit('/')
         .next()
-        .context("create_draft_pr: no PR number in URL")?
+        .context("create_pr: no PR number in URL")?
         .parse()
-        .with_context(|| format!("create_draft_pr: failed to parse PR number from: {}", url))?;
+        .with_context(|| format!("create_pr: failed to parse PR number from: {}", url))?;
 
     Ok(pr_number)
 }
