@@ -122,7 +122,12 @@ async fn main() -> Result<()> {
                 model,
                 runs_dir: PathBuf::from(&runs_dir),
                 max_concurrent,
-                agents_dir: PathBuf::from(&agents_dir).canonicalize().with_context(|| format!("agents directory not found: {} (pass --agents-dir with a valid path)", agents_dir))?,
+                agents_dir: PathBuf::from(&agents_dir).canonicalize().with_context(|| {
+                    format!(
+                        "agents directory not found: {} (pass --agents-dir with a valid path)",
+                        agents_dir
+                    )
+                })?,
             };
 
             run_start(config, no_tui).await
@@ -443,13 +448,73 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
         }
 
         // -- 6. Process each active pipeline --------------------------------
-        // The orchestrator owns every stage transition.  For orchestrator
-        // stages (Ingest, Understand, Submit) we spawn a short-lived task
-        // without a semaphore permit.  Watch is handled inline (quick GH
-        // API call each tick).  For agent stages (Plan, Implement, Verify,
-        // Fix) we spawn a copilot task gated by the semaphore.
-        // Each task does exactly ONE stage and exits.
+        // Split into two passes so that inline WATCH processing is
+        // reflected in the TUI before we spawn long-running agent tasks.
+        //
+        // Pass 1 (inline): WATCH pipelines — quick GH API calls.
+        // Pass 2 (spawned): agent & orchestrator stages.
         let keys: Vec<u64> = pipelines.keys().copied().collect();
+
+        // --- Pass 1: WATCH (inline) ----------------------------------------
+        for &key in &keys {
+            if running.contains(&key) {
+                continue;
+            }
+            let is_watch = pipelines
+                .get(&key)
+                .is_some_and(|p| matches!(p.stage, pipeline::Stage::Watch));
+            if !is_watch {
+                continue;
+            }
+
+            let mut p = match pipelines.remove(&key) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            match p.do_watch().await {
+                Ok(true) => {
+                    // Stage changed (Fix, Done, or Failed).
+                    if let Err(e) = db.upsert_pipeline(&p) {
+                        error!(issue = key, "failed to persist Watch transition: {:#}", e);
+                    }
+                    info!(issue = key, stage = %p.stage, "Watch: stage transitioned");
+                }
+                Ok(false) => {
+                    // No change.  Persist so the fingerprint is saved.
+                    if let Err(e) = db.upsert_pipeline(&p) {
+                        error!(issue = key, "failed to persist Watch state: {:#}", e);
+                    }
+                }
+                Err(e) => {
+                    error!(issue = key, "Watch check failed: {:#}", e);
+                }
+            }
+        }
+
+        // --- Mid-cycle TUI refresh after WATCH processing ------------------
+        // This ensures all WATCH-stage pipelines are visible immediately,
+        // before long-running agent tasks are spawned.
+        if let Ok(all) = db.get_all_active_pipelines() {
+            let now = chrono::Utc::now();
+            state_tx.send_modify(|state| {
+                state.pipelines = all
+                    .values()
+                    .map(|p| PipelineSnapshot {
+                        issue_number: p.issue_number,
+                        issue_title: p.issue_title.clone(),
+                        stage: p.stage.clone(),
+                        branch_name: p.branch_name.clone(),
+                        pr_number: p.pr_number,
+                        status_text: stage_status_text(&p.stage, running.contains(&p.issue_number)),
+                    })
+                    .collect();
+                state.last_poll = Some(now);
+                state.cycle_count = cycle_count;
+            });
+        }
+
+        // --- Pass 2: Agent & Orchestrator stages (spawned) -----------------
         for key in keys {
             if running.contains(&key) {
                 continue;
@@ -465,30 +530,8 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
             }
 
             match &p.stage {
-                // -- Watch: handled inline by the orchestrator ---------------
-                // This is the critical fix.  Watch is a quick GH API call
-                // done every tick.  No task, no semaphore, no inner loop.
-                pipeline::Stage::Watch => {
-                    let mut p = p;
-                    match p.do_watch().await {
-                        Ok(true) => {
-                            // Stage changed (Fix, Done, or Failed).
-                            if let Err(e) = db.upsert_pipeline(&p) {
-                                error!(issue = key, "failed to persist Watch transition: {:#}", e);
-                            }
-                            info!(issue = key, stage = %p.stage, "Watch: stage transitioned");
-                        }
-                        Ok(false) => {
-                            // No change.  Persist so the fingerprint is saved.
-                            if let Err(e) = db.upsert_pipeline(&p) {
-                                error!(issue = key, "failed to persist Watch state: {:#}", e);
-                            }
-                        }
-                        Err(e) => {
-                            error!(issue = key, "Watch check failed: {:#}", e);
-                        }
-                    }
-                }
+                // Watch already handled in Pass 1.
+                pipeline::Stage::Watch => {}
 
                 // -- Agent stages: spawn copilot task with semaphore ---------
                 pipeline::Stage::Plan
@@ -582,8 +625,8 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
         }
 
         // -- 7. TUI refresh from database (single source of truth) ----------
-        // Only the orchestrator writes to the TUI state channel.
-        // No tasks touch this — eliminates the race condition.
+        // Final refresh after all spawned tasks have been kicked off,
+        // so the `running` set is up-to-date for status text.
         if let Ok(all) = db.get_all_active_pipelines() {
             let now = chrono::Utc::now();
             state_tx.send_modify(|state| {

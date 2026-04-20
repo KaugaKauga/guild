@@ -12,7 +12,7 @@ jobs:
         working-directory: daemon
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup default stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon

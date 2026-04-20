@@ -94,18 +94,17 @@ async fn render_loop(
     let mut scroll_offset: usize = 0;
     let mut tick: usize = 0;
 
+    // Clear once at startup so we begin with a clean slate.
+    // Ratatui's draw() uses double-buffer diffing after this point,
+    // so per-frame clears are unnecessary and cause flicker.
+    terminal.clear()?;
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
         let state = state_rx.borrow().clone();
-
-        // Force a full screen clear before every frame.  Copilot
-        // subprocesses may write to the terminal despite setsid(),
-        // corrupting the alternate screen buffer.  A full clear
-        // ensures the next draw overwrites everything.
-        terminal.clear()?;
 
         terminal.draw(|frame| {
             let area = frame.area();
