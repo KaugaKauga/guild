@@ -21,3 +21,9 @@ Implement the changes described in the plan.
    - **## Problem** — A short problem statement (max three sentences). Do NOT copy the issue description. Summarize the core problem in your own words.
    - **## Solution** — A short description of how you solved the problem. Be specific about what was changed and why.
    Keep it concise. No boilerplate.
+6. Before finishing, reflect: did you learn anything non-obvious about this codebase? (build quirks, naming conventions, test patterns, env requirements, gotchas). If so, append your learnings to `.guild/learnings.md` in the worktree (create the `.guild/` directory and file if they don't exist).
+   - Use a simple markdown bullet list format
+   - Only write genuinely useful, repo-specific insights
+   - Do NOT repeat learnings that are already in the file
+   - Keep each learning to one or two sentences
+   - If you have nothing worth recording, skip this step
