@@ -498,8 +498,7 @@ impl Pipeline {
             };
 
             // Read the PR description written by the IMPLEMENT agent.
-            let agent_description =
-                read_file_or(&self.run_dir.join("pr_description.md"), "");
+            let agent_description = read_file_or(&self.run_dir.join("pr_description.md"), "");
 
             let mut pr_body = format!("Closes #{}\n", self.issue_number);
             if !agent_description.is_empty() {
