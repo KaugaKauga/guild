@@ -395,7 +395,15 @@ impl Pipeline {
             &self.run_dir.join("plan.md"),
             "No plan file found -- read the issue and implement directly.",
         );
-        let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
+
+        // Prefer learnings from the worktree (may have been updated by a
+        // previous agent), falling back to the snapshot taken during UNDERSTAND.
+        let worktree_learnings = self.worktree.join(".guild").join("learnings.md");
+        let learnings = if worktree_learnings.exists() {
+            read_file_or(&worktree_learnings, "")
+        } else {
+            read_file_or(&self.run_dir.join("learnings.md"), "")
+        };
         let worktree = self.worktree.display().to_string();
         let desc_path = self.run_dir.join("pr_description.md").display().to_string();
 
@@ -701,7 +709,15 @@ impl Pipeline {
             "(no blocker report)",
         );
         let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
-        let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
+
+        // Re-read learnings from the worktree so we pick up anything the
+        // IMPLEMENT or a previous FIX agent appended to .guild/learnings.md.
+        let worktree_learnings = self.worktree.join(".guild").join("learnings.md");
+        let learnings = if worktree_learnings.exists() {
+            read_file_or(&worktree_learnings, "")
+        } else {
+            read_file_or(&self.run_dir.join("learnings.md"), "")
+        };
 
         let prompt = load_agent_prompt(
             &config.agents_dir,
