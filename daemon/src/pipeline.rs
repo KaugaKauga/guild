@@ -11,6 +11,31 @@ use crate::github;
 use crate::Config;
 
 // ---------------------------------------------------------------------------
+// Agent prompt loader
+// ---------------------------------------------------------------------------
+
+/// Load an agent prompt template from disk and perform variable substitution.
+///
+/// Reads `{agents_dir}/{stage_name}.md`, then replaces each `{key}` in `vars`
+/// with the corresponding value.
+pub fn load_agent_prompt(
+    agents_dir: &Path,
+    stage_name: &str,
+    vars: &[(&str, &str)],
+) -> Result<String> {
+    let template_path = agents_dir.join(format!("{}.md", stage_name));
+    let mut prompt = fs::read_to_string(&template_path)
+        .with_context(|| format!("failed to load agent template: {}", template_path.display()))?;
+
+    for (key, value) in vars {
+        let placeholder = format!("{{{}}}", key);
+        prompt = prompt.replace(&placeholder, value);
+    }
+
+    Ok(prompt)
+}
+
+// ---------------------------------------------------------------------------
 // Stage
 // ---------------------------------------------------------------------------
 
@@ -54,7 +79,10 @@ impl Stage {
     /// Returns true if this stage requires a copilot agent to run.
     /// These stages acquire a semaphore permit in the orchestrator.
     pub fn needs_agent(&self) -> bool {
-        matches!(self, Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix)
+        matches!(
+            self,
+            Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix
+        )
     }
 }
 
@@ -329,34 +357,20 @@ impl Pipeline {
     pub async fn do_plan(&mut self, config: &Config) -> Result<bool> {
         let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
         let repo_summary = read_file_or(&self.run_dir.join("repo_summary.md"), "(no repo summary)");
-
         let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
+        let plan_path = self.run_dir.join("plan.md").display().to_string();
 
-        let prompt = format!(
-            "You are an autonomous coding agent in the PLAN stage.\n\
-             \n\
-             ## Your Task\n\
-             Read the GitHub issue and repo context below, then create a detailed implementation plan.\n\
-             \n\
-             ## Issue\n\
-             {issue_body}\n\
-             \n\
-             ## Repo Structure\n\
-             {repo_summary}\n\
-             \n\
-             ## Repo Learnings (IMPORTANT — read before planning)\n\
-             {learnings}\n\
-             \n\
-             ## Instructions\n\
-             1. Read the issue carefully -- understand acceptance criteria\n\
-             2. Trace the user path -- what component does this touch?\n\
-             3. Write your plan to {plan_path}\n\
-             4. Include: files to create/modify, tests to write, UI wiring needed\n",
-            issue_body = issue_body,
-            repo_summary = repo_summary,
-            learnings = learnings,
-            plan_path = self.run_dir.join("plan.md").display(),
-        );
+        let prompt = load_agent_prompt(
+            &config.agents_dir,
+            "plan",
+            &[
+                ("issue_body", &issue_body),
+                ("repo_summary", &repo_summary),
+                ("learnings", &learnings),
+                ("plan_path", &plan_path),
+            ],
+        )
+        .context("Plan: failed to load agent template")?;
 
         let prompt_path = self.run_dir.join("prompt_plan.md");
         fs::write(&prompt_path, &prompt).context("Plan: failed to write prompt_plan.md")?;
@@ -382,40 +396,21 @@ impl Pipeline {
             "No plan file found -- read the issue and implement directly.",
         );
         let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
-        let desc_path = self.run_dir.join("pr_description.md");
+        let worktree = self.worktree.display().to_string();
+        let desc_path = self.run_dir.join("pr_description.md").display().to_string();
 
-        let prompt = format!(
-            "You are an autonomous coding agent in the IMPLEMENT stage.\n\
-             \n\
-             ## Your Task\n\
-             Implement the changes described in the plan.\n\
-             \n\
-             ## Issue\n\
-             {issue_body}\n\
-             \n\
-             ## Plan\n\
-             {plan}\n\
-             \n\
-             ## Repo Learnings (IMPORTANT — read before implementing)\n\
-             {learnings}\n\
-             \n\
-             ## Instructions\n\
-             1. Write the code in the worktree at: {worktree}\n\
-             2. Write tests\n\
-             3. Wire it into the UI so a user can actually see/use it\n\
-             4. Do NOT commit -- the system will handle that\n\
-             5. When done, write a file at `{desc_path}` with exactly two sections:\n\
-                - **## Problem** — A short problem statement (max three sentences). \
-                  Do NOT copy the issue description. Summarize the core problem in your own words.\n\
-                - **## Solution** — A short description of how you solved the problem. \
-                  Be specific about what was changed and why.\n\
-                Keep it concise. No boilerplate.\n",
-            issue_body = issue_body,
-            plan = plan,
-            learnings = learnings,
-            worktree = self.worktree.display(),
-            desc_path = desc_path.display(),
-        );
+        let prompt = load_agent_prompt(
+            &config.agents_dir,
+            "implement",
+            &[
+                ("issue_body", &issue_body),
+                ("plan", &plan),
+                ("learnings", &learnings),
+                ("worktree", &worktree),
+                ("desc_path", &desc_path),
+            ],
+        )
+        .context("Implement: failed to load agent template")?;
 
         let prompt_path = self.run_dir.join("prompt_implement.md");
         fs::write(&prompt_path, &prompt)
@@ -436,20 +431,14 @@ impl Pipeline {
     }
 
     pub async fn do_verify(&mut self, config: &Config) -> Result<bool> {
-        let prompt = format!(
-            "You are an autonomous coding agent in the VERIFY stage.\n\
-             \n\
-             ## Your Task\n\
-             Run linting and basic checks on the code you just wrote.\n\
-             \n\
-             ## Instructions\n\
-             1. Look at the repo's package.json / Cargo.toml / Makefile for lint commands\n\
-             2. Run linting (e.g., npm run lint, cargo clippy, etc.)\n\
-             3. Do NOT run the full test suite if it might hang (watch mode, browser tests)\n\
-             4. Fix any lint errors you find\n\
-             5. Write a summary of what you checked to {verify_report}\n",
-            verify_report = self.run_dir.join("verify_report.md").display(),
-        );
+        let verify_report = self.run_dir.join("verify_report.md").display().to_string();
+
+        let prompt = load_agent_prompt(
+            &config.agents_dir,
+            "verify",
+            &[("verify_report", &verify_report)],
+        )
+        .context("Verify: failed to load agent template")?;
 
         let prompt_path = self.run_dir.join("prompt_verify.md");
         fs::write(&prompt_path, &prompt).context("Verify: failed to write prompt_verify.md")?;
@@ -617,9 +606,8 @@ impl Pipeline {
         }
 
         // Determine whether there are actual actionable blockers.
-        let has_blockers = !failed_checks.is_empty()
-            || !review_comments.is_empty()
-            || !guild_comments.is_empty();
+        let has_blockers =
+            !failed_checks.is_empty() || !review_comments.is_empty() || !guild_comments.is_empty();
 
         // Check if blocker fingerprint changed.
         let changed = match &self.blocker_fingerprint {
@@ -690,7 +678,10 @@ impl Pipeline {
         // Fingerprint changed but no actionable blockers — just update baseline.
         if changed {
             self.blocker_fingerprint = Some(fingerprint);
-            info!("Watch: fingerprint updated for PR #{} (no actionable blockers)", pr_number);
+            info!(
+                "Watch: fingerprint updated for PR #{} (no actionable blockers)",
+                pr_number
+            );
         }
 
         // No change -- will check again next poll.
@@ -712,29 +703,16 @@ impl Pipeline {
         let issue_body = read_file_or(&self.run_dir.join("issue_body.md"), "(no issue body)");
         let learnings = read_file_or(&self.run_dir.join("learnings.md"), "");
 
-        let prompt = format!(
-            "You are an autonomous coding agent in the FIX stage.\n\
-             \n\
-             ## Your Task\n\
-             Fix the issues blocking the PR.\n\
-             \n\
-             ## Blocker Report\n\
-             {blocker_report}\n\
-             \n\
-             ## Original Issue\n\
-             {issue_body}\n\
-             \n\
-             ## Repo Learnings (IMPORTANT — read before fixing)\n\
-             {learnings}\n\
-             \n\
-             ## Instructions\n\
-             1. Read the blocker report above\n\
-             2. Fix failing checks, address review comments\n\
-             3. Do NOT commit -- the system will handle that\n",
-            blocker_report = blocker_report,
-            issue_body = issue_body,
-            learnings = learnings,
-        );
+        let prompt = load_agent_prompt(
+            &config.agents_dir,
+            "fix",
+            &[
+                ("blocker_report", &blocker_report),
+                ("issue_body", &issue_body),
+                ("learnings", &learnings),
+            ],
+        )
+        .context("Fix: failed to load agent template")?;
 
         let prompt_path = self.run_dir.join("prompt_fix.md");
         fs::write(&prompt_path, &prompt).context("Fix: failed to write prompt_fix.md")?;
@@ -862,4 +840,61 @@ fn scan_known_files(base: &Path, names: &[&str]) -> Vec<String> {
         .filter(|name| base.join(name).exists())
         .map(|name| name.to_string())
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_load_agent_prompt_substitutes_placeholders() {
+        let dir = std::env::temp_dir().join("guild_test_agents");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(
+            dir.join("test_stage.md"),
+            "Hello {name}, your task is {task}.",
+        )
+        .unwrap();
+
+        let result =
+            load_agent_prompt(&dir, "test_stage", &[("name", "Alice"), ("task", "coding")])
+                .unwrap();
+
+        assert_eq!(result, "Hello Alice, your task is coding.");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_agent_prompt_missing_file() {
+        let dir = std::env::temp_dir().join("guild_test_agents_missing");
+        let result = load_agent_prompt(&dir, "nonexistent", &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_agent_prompt_no_vars() {
+        let dir = std::env::temp_dir().join("guild_test_agents_novars");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("plain.md"), "No placeholders here.").unwrap();
+
+        let result = load_agent_prompt(&dir, "plain", &[]).unwrap();
+        assert_eq!(result, "No placeholders here.");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_agent_prompt_multiple_occurrences() {
+        let dir = std::env::temp_dir().join("guild_test_agents_multi");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("repeat.md"), "{x} and {x} again").unwrap();
+
+        let result = load_agent_prompt(&dir, "repeat", &[("x", "val")]).unwrap();
+        assert_eq!(result, "val and val again");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

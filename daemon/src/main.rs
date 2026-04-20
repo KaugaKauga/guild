@@ -63,6 +63,10 @@ enum Commands {
         #[arg(short = 'c', long, default_value_t = 5)]
         max_concurrent: usize,
 
+        /// Directory containing agent prompt templates
+        #[arg(long, default_value = "./agents")]
+        agents_dir: String,
+
         /// Disable the TUI and use plain log output
         #[arg(long)]
         no_tui: bool,
@@ -86,6 +90,7 @@ pub struct Config {
     pub model: String,
     pub runs_dir: PathBuf,
     pub max_concurrent: usize,
+    pub agents_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -102,6 +107,7 @@ async fn main() -> Result<()> {
             model,
             runs_dir,
             max_concurrent,
+            agents_dir,
             no_tui,
         } => {
             let repo = repo
@@ -116,6 +122,7 @@ async fn main() -> Result<()> {
                 model,
                 runs_dir: PathBuf::from(&runs_dir),
                 max_concurrent,
+                agents_dir: PathBuf::from(&agents_dir),
             };
 
             run_start(config, no_tui).await
@@ -364,10 +371,16 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                 continue;
             }
 
-            info!(issue = issue.number, "new issue detected, creating pipeline");
+            info!(
+                issue = issue.number,
+                "new issue detected, creating pipeline"
+            );
             let p = pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir);
             if let Err(e) = db.upsert_pipeline(&p) {
-                error!(issue = issue.number, "failed to persist new pipeline: {:#}", e);
+                error!(
+                    issue = issue.number,
+                    "failed to persist new pipeline: {:#}", e
+                );
             }
         }
 
@@ -414,7 +427,10 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                     housekeeping_keys.push(issue_number);
                 }
             } else if p.is_failed() && !active_on_github.contains(&issue_number) {
-                info!(issue = issue_number, "removing failed pipeline for inactive issue");
+                info!(
+                    issue = issue_number,
+                    "removing failed pipeline for inactive issue"
+                );
                 if let Err(e) = db.remove_pipeline(issue_number) {
                     error!(issue = issue_number, "failed to remove pipeline: {:#}", e);
                 } else {
@@ -496,7 +512,8 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                             tracing::error!(
                                 issue = key,
                                 "failed to persist pipeline after {}: {:#}",
-                                stage_name, e
+                                stage_name,
+                                e
                             );
                         }
 
@@ -521,9 +538,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
 
                 // -- Orchestrator stages: spawn lightweight task -------------
                 // No semaphore needed — these don't run copilot.
-                pipeline::Stage::Ingest
-                | pipeline::Stage::Understand
-                | pipeline::Stage::Submit => {
+                pipeline::Stage::Ingest | pipeline::Stage::Understand | pipeline::Stage::Submit => {
                     running.insert(key);
                     let cfg = config.clone();
                     let db_handle = db.clone();
@@ -537,7 +552,8 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                             tracing::error!(
                                 issue = key,
                                 "failed to persist pipeline after {}: {:#}",
-                                stage_name, e
+                                stage_name,
+                                e
                             );
                         }
 
@@ -579,10 +595,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                         stage: p.stage.clone(),
                         branch_name: p.branch_name.clone(),
                         pr_number: p.pr_number,
-                        status_text: stage_status_text(
-                            &p.stage,
-                            running.contains(&p.issue_number),
-                        ),
+                        status_text: stage_status_text(&p.stage, running.contains(&p.issue_number)),
                     })
                     .collect();
                 state.last_poll = Some(now);
