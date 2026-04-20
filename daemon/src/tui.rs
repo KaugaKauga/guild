@@ -214,15 +214,17 @@ fn render_pipeline_table(
         return;
     }
 
-    let header_cells = ["#", "Issue", "", "Stage", "Progress", "Status", "Branch", "PR"]
-        .iter()
-        .map(|h| {
-            Cell::from(*h).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        });
+    let header_cells = [
+        "#", "Issue", "", "Stage", "Progress", "Status", "Branch", "PR",
+    ]
+    .iter()
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1);
 
     let visible_pipelines: Vec<_> = state.pipelines.iter().skip(scroll_offset).collect();

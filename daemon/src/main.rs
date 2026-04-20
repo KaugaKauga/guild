@@ -142,7 +142,10 @@ fn run_status(runs_dir: &str) -> Result<()> {
     if pipelines.is_empty() {
         println!("No active pipelines.");
     } else {
-        println!("{:<8} {:<32} {:<14} {:<12} Branch", "Issue", "Title", "Stage", "Progress");
+        println!(
+            "{:<8} {:<32} {:<14} {:<12} Branch",
+            "Issue", "Title", "Stage", "Progress"
+        );
         println!("{}", "─".repeat(90));
         for p in pipelines.values() {
             let ordinal = p.stage.ordinal();
@@ -428,8 +431,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                                     {
                                         snap.stage = pipeline.stage.clone();
                                         snap.pr_number = pipeline.pr_number;
-                                        snap.status_text =
-                                            stage_status_text(&pipeline.stage);
+                                        snap.status_text = stage_status_text(&pipeline.stage);
                                     } else {
                                         state.pipelines.push(PipelineSnapshot {
                                             issue_number: pipeline.issue_number,
@@ -437,8 +439,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                                             stage: pipeline.stage.clone(),
                                             branch_name: pipeline.branch_name.clone(),
                                             pr_number: pipeline.pr_number,
-                                            status_text:
-                                                stage_status_text(&pipeline.stage),
+                                            status_text: stage_status_text(&pipeline.stage),
                                         });
                                     }
                                 });
@@ -447,11 +448,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                             }
                             Ok(false) => break,
                             Err(e) => {
-                                tracing::error!(
-                                    issue = key,
-                                    "pipeline advance error: {:#}",
-                                    e
-                                );
+                                tracing::error!(issue = key, "pipeline advance error: {:#}", e);
                                 break;
                             }
                         }
@@ -469,22 +466,12 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                     // Handle completion inside the task so the main poll
                     // loop is never blocked by cleanup / branch deletion.
                     if pipeline.is_done() {
-                        tracing::info!(
-                            issue = key,
-                            "pipeline completed, recording in ledger"
-                        );
+                        tracing::info!(issue = key, "pipeline completed, recording in ledger");
                         if let Err(e) = db_handle.complete_pipeline(&pipeline) {
-                            tracing::error!(
-                                issue = key,
-                                "failed to complete pipeline: {:#}",
-                                e
-                            );
+                            tracing::error!(issue = key, "failed to complete pipeline: {:#}", e);
                         } else {
-                            github::delete_remote_branch(
-                                &pipeline.repo,
-                                &pipeline.branch_name,
-                            )
-                            .await;
+                            github::delete_remote_branch(&pipeline.repo, &pipeline.branch_name)
+                                .await;
                             pipeline.cleanup_run();
                         }
                     }
@@ -548,7 +535,6 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     info!("guild daemon shut down cleanly");
     Ok(())
 }
-
 
 // ---------------------------------------------------------------------------
 // Orphan run directory cleanup
