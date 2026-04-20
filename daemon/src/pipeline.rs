@@ -639,9 +639,19 @@ impl Pipeline {
             if failed_checks.is_empty() {
                 report.push_str("- (none)\n");
             } else {
+                // Fetch CI logs for failed checks (best-effort).
+                let failed_logs = github::fetch_failed_check_logs(&self.repo, &failed_checks).await;
+
                 for c in &failed_checks {
                     let conclusion = c.conclusion.as_deref().unwrap_or("unknown");
                     report.push_str(&format!("- **{}**: {}\n", c.name, conclusion));
+
+                    // Include log output if available.
+                    if let Some(log_entry) = failed_logs.iter().find(|l| l.name == c.name) {
+                        report.push_str("\n<details><summary>CI Log</summary>\n\n```\n");
+                        report.push_str(&log_entry.log);
+                        report.push_str("\n```\n\n</details>\n\n");
+                    }
                 }
             }
 

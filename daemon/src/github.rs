@@ -76,6 +76,14 @@ pub struct CheckRun {
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
+    #[serde(rename = "detailsUrl", default)]
+    pub details_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FailedCheckLog {
+    pub name: String,
+    pub log: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -421,4 +429,156 @@ pub async fn fetch_pr_status(repo: &str, pr_number: u64) -> Result<PrStatus> {
 
     let status: PrStatus = serde_json::from_str(&json).context("failed to parse PR status JSON")?;
     Ok(status)
+}
+
+/// Maximum bytes of log output to keep per failed check.
+const MAX_LOG_BYTES: usize = 16_384;
+/// Maximum number of lines of log output to keep per failed check.
+const MAX_LOG_LINES: usize = 200;
+
+/// Extract a GitHub Actions run ID from a details URL.
+///
+/// Typical URL shapes:
+/// - `https://github.com/{owner}/{repo}/actions/runs/{run_id}`
+/// - `https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}`
+fn extract_run_id(url: &str) -> Option<&str> {
+    let marker = "/actions/runs/";
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    // Run ID ends at '/' or end-of-string.
+    let end = rest.find('/').unwrap_or(rest.len());
+    let id = &rest[..end];
+    // Sanity: must be all digits.
+    if id.chars().all(|c| c.is_ascii_digit()) && !id.is_empty() {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// Truncate `text` to the last `MAX_LOG_LINES` lines and `MAX_LOG_BYTES` bytes.
+fn truncate_log(text: &str) -> String {
+    // First truncate to last N lines.
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = if lines.len() > MAX_LOG_LINES {
+        lines[lines.len() - MAX_LOG_LINES..].join("\n")
+    } else {
+        text.to_string()
+    };
+
+    // Then truncate to max bytes (from the end).
+    if tail.len() > MAX_LOG_BYTES {
+        let start = tail.len() - MAX_LOG_BYTES;
+        // Find a safe UTF-8 boundary.
+        let safe_start = tail.ceil_char_boundary(start);
+        format!("…(truncated)\n{}", &tail[safe_start..])
+    } else {
+        tail
+    }
+}
+
+/// Fetch CI failure logs for the given failed checks.
+///
+/// For each check whose `details_url` points to a GitHub Actions run, this
+/// runs `gh run view <run_id> --log-failed` and returns the (truncated) output.
+///
+/// This is best-effort: if fetching logs for a particular check fails, that
+/// check is silently skipped.
+pub async fn fetch_failed_check_logs(
+    repo: &str,
+    failed_checks: &[&CheckRun],
+) -> Vec<FailedCheckLog> {
+    // Deduplicate run IDs — multiple check runs can belong to the same workflow run.
+    let mut seen_run_ids = std::collections::HashSet::new();
+    let mut results = Vec::new();
+
+    for check in failed_checks {
+        let run_id = match check.details_url.as_deref().and_then(extract_run_id) {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+
+        if !seen_run_ids.insert(run_id.clone()) {
+            continue;
+        }
+
+        let log_result = run_gh(&["run", "view", &run_id, "--repo", repo, "--log-failed"]).await;
+
+        match log_result {
+            Ok(raw_log) => {
+                let log = truncate_log(&raw_log);
+                results.push(FailedCheckLog {
+                    name: check.name.clone(),
+                    log,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    check = %check.name,
+                    run_id,
+                    "failed to fetch CI logs: {:#}",
+                    e
+                );
+            }
+        }
+    }
+
+    results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_run_id_standard_url() {
+        let url = "https://github.com/owner/repo/actions/runs/12345678";
+        assert_eq!(extract_run_id(url), Some("12345678"));
+    }
+
+    #[test]
+    fn test_extract_run_id_with_job() {
+        let url = "https://github.com/owner/repo/actions/runs/12345678/job/99999";
+        assert_eq!(extract_run_id(url), Some("12345678"));
+    }
+
+    #[test]
+    fn test_extract_run_id_no_actions() {
+        assert_eq!(extract_run_id("https://github.com/owner/repo/pull/1"), None);
+    }
+
+    #[test]
+    fn test_extract_run_id_empty() {
+        assert_eq!(extract_run_id(""), None);
+    }
+
+    #[test]
+    fn test_truncate_log_short() {
+        let log = "line1\nline2\nline3\n";
+        let result = truncate_log(log);
+        assert_eq!(result, log.to_string());
+    }
+
+    #[test]
+    fn test_truncate_log_many_lines() {
+        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
+        let log = lines.join("\n");
+        let result = truncate_log(&log);
+        let result_lines: Vec<&str> = result.lines().collect();
+        assert_eq!(result_lines.len(), MAX_LOG_LINES);
+        // Should contain the last lines.
+        assert!(result.contains("line 299"));
+        assert!(!result.contains("line 0\n"));
+    }
+
+    #[test]
+    fn test_truncate_log_large_bytes() {
+        // Create a string larger than MAX_LOG_BYTES but fewer than MAX_LOG_LINES lines.
+        let line = "x".repeat(1000);
+        let lines: Vec<String> = (0..20).map(|_| line.clone()).collect();
+        let log = lines.join("\n");
+        assert!(log.len() > MAX_LOG_BYTES);
+        let result = truncate_log(&log);
+        assert!(result.len() <= MAX_LOG_BYTES + 20); // +20 for the truncation prefix
+    }
 }
