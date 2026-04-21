@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -20,6 +20,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Terminal;
+
+use futures::StreamExt;
 
 use crate::pipeline::Stage;
 
@@ -86,71 +88,153 @@ pub async fn run_tui(
     result
 }
 
+/// Returns true if any pipeline is in an active (non-terminal) stage.
+pub fn has_active_pipelines(state: &DaemonState) -> bool {
+    state
+        .pipelines
+        .iter()
+        .any(|p| !matches!(p.stage, Stage::Done | Stage::Failed(_)))
+}
+
+/// Compute the "last poll" display text, returning the seconds value for caching.
+pub fn format_last_poll(last_poll: Option<chrono::DateTime<chrono::Utc>>) -> (Option<i64>, String) {
+    match last_poll {
+        Some(t) => {
+            let secs = chrono::Utc::now().signed_duration_since(t).num_seconds();
+            (Some(secs), format!("last poll: {}s ago", secs))
+        }
+        None => (None, "last poll: —".to_string()),
+    }
+}
+
 async fn render_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state_rx: tokio::sync::watch::Receiver<DaemonState>,
+    mut state_rx: tokio::sync::watch::Receiver<DaemonState>,
     shutdown: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut scroll_offset: usize = 0;
     let mut tick: usize = 0;
+    let mut event_stream = EventStream::new();
+    let mut spinner_interval = tokio::time::interval(Duration::from_millis(200));
+
+    // Cache for the "last poll: Xs ago" text to avoid per-frame diffs
+    let mut cached_poll_secs: Option<i64>;
+    let mut cached_poll_text: String;
 
     // Clear once at startup so we begin with a clean slate.
     // Ratatui's draw() uses double-buffer diffing after this point,
     // so per-frame clears are unnecessary and cause flicker.
     terminal.clear()?;
 
+    // Draw initial frame
+    {
+        let state = state_rx.borrow().clone();
+        let (secs, text) = format_last_poll(state.last_poll);
+        cached_poll_secs = secs;
+        cached_poll_text = text;
+        draw_frame(terminal, &state, scroll_offset, tick, &cached_poll_text)?;
+    }
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
-        let state = state_rx.borrow().clone();
+        let mut needs_redraw = false;
 
-        terminal.draw(|frame| {
-            let area = frame.area();
-
-            // Layout: header (3) | table (stretch) | footer (3)
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(5),
-                    Constraint::Length(3),
-                ])
-                .split(area);
-
-            render_header(frame, chunks[0], &state);
-            render_pipeline_table(frame, chunks[1], &state, scroll_offset, tick);
-            render_footer(frame, chunks[2], &state);
-        })?;
-
-        tick = tick.wrapping_add(1);
-
-        // Poll for keyboard events (non-blocking with timeout)
-        if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            shutdown.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            scroll_offset = scroll_offset.saturating_sub(1);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let max = state_rx.borrow().pipelines.len().saturating_sub(1);
-                            if scroll_offset < max {
-                                scroll_offset += 1;
+        tokio::select! {
+            result = state_rx.changed() => {
+                if result.is_ok() {
+                    needs_redraw = true;
+                    // Update cached poll text if seconds changed
+                    let state = state_rx.borrow();
+                    let (secs, text) = format_last_poll(state.last_poll);
+                    if cached_poll_secs != secs {
+                        cached_poll_secs = secs;
+                        cached_poll_text = text;
+                    }
+                }
+            }
+            maybe_event = event_stream.next() => {
+                if let Some(Ok(event)) = maybe_event {
+                    match event {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    shutdown.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    scroll_offset = scroll_offset.saturating_sub(1);
+                                    needs_redraw = true;
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    let max = state_rx.borrow()
+                                        .pipelines.len().saturating_sub(1);
+                                    if scroll_offset < max {
+                                        scroll_offset += 1;
+                                    }
+                                    needs_redraw = true;
+                                }
+                                _ => {}
                             }
+                        }
+                        Event::Resize(_, _) => {
+                            needs_redraw = true;
                         }
                         _ => {}
                     }
                 }
             }
+            _ = spinner_interval.tick() => {
+                tick = tick.wrapping_add(1);
+                // Only redraw for spinner if there are active pipelines
+                let state = state_rx.borrow();
+                if has_active_pipelines(&state) {
+                    needs_redraw = true;
+                }
+                // Update poll text periodically
+                let (secs, text) = format_last_poll(state.last_poll);
+                if cached_poll_secs != secs {
+                    cached_poll_secs = secs;
+                    cached_poll_text = text;
+                    needs_redraw = true;
+                }
+            }
+        }
+
+        if needs_redraw {
+            let state = state_rx.borrow().clone();
+            draw_frame(terminal, &state, scroll_offset, tick, &cached_poll_text)?;
         }
     }
 
+    Ok(())
+}
+
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &DaemonState,
+    scroll_offset: usize,
+    tick: usize,
+    last_poll_text: &str,
+) -> io::Result<()> {
+    terminal.draw(|frame| {
+        let area = frame.area();
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(5),
+                Constraint::Length(3),
+            ])
+            .split(area);
+
+        render_header(frame, chunks[0], state);
+        render_pipeline_table(frame, chunks[1], state, scroll_offset, tick);
+        render_footer(frame, chunks[2], state, last_poll_text);
+    })?;
     Ok(())
 }
 
@@ -301,15 +385,12 @@ fn render_pipeline_table(
     frame.render_widget(table, area);
 }
 
-fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &DaemonState) {
-    let last_poll_text = match state.last_poll {
-        Some(t) => {
-            let elapsed = chrono::Utc::now().signed_duration_since(t);
-            format!("last poll: {}s ago", elapsed.num_seconds())
-        }
-        None => "last poll: —".to_string(),
-    };
-
+fn render_footer(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    state: &DaemonState,
+    last_poll_text: &str,
+) {
     let active_count = state
         .pipelines
         .iter()
@@ -439,5 +520,67 @@ mod tests {
         assert!(bar.contains("3/8"));
         assert!(bar.contains("███"));
         assert!(bar.contains("░░░░░"));
+    }
+
+    #[test]
+    fn cached_poll_text_format_none() {
+        let (secs, text) = format_last_poll(None);
+        assert_eq!(secs, None);
+        assert_eq!(text, "last poll: —");
+    }
+
+    #[test]
+    fn cached_poll_text_format_some() {
+        let past = chrono::Utc::now() - chrono::Duration::seconds(5);
+        let (secs, text) = format_last_poll(Some(past));
+        // Should be approximately 5 seconds (allow for test execution time)
+        assert!(secs.unwrap() >= 4 && secs.unwrap() <= 6);
+        assert!(text.starts_with("last poll: "));
+        assert!(text.ends_with("s ago"));
+    }
+
+    #[test]
+    fn no_redraw_when_no_active_pipelines() {
+        let empty_state = DaemonState::default();
+        assert!(!has_active_pipelines(&empty_state));
+
+        let done_state = DaemonState {
+            pipelines: vec![
+                PipelineSnapshot {
+                    issue_number: 1,
+                    issue_title: "test".into(),
+                    stage: Stage::Done,
+                    branch_name: "b".into(),
+                    pr_number: None,
+                    status_text: "done".into(),
+                },
+                PipelineSnapshot {
+                    issue_number: 2,
+                    issue_title: "test2".into(),
+                    stage: Stage::Failed("err".into()),
+                    branch_name: "b2".into(),
+                    pr_number: None,
+                    status_text: "failed".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(!has_active_pipelines(&done_state));
+    }
+
+    #[test]
+    fn redraw_when_active_pipelines_exist() {
+        let active_state = DaemonState {
+            pipelines: vec![PipelineSnapshot {
+                issue_number: 1,
+                issue_title: "test".into(),
+                stage: Stage::Implement,
+                branch_name: "b".into(),
+                pr_number: None,
+                status_text: "running".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(has_active_pipelines(&active_state));
     }
 }
