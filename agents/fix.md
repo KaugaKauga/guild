@@ -14,7 +14,7 @@ Fix the issues blocking the PR.
 
 ## Instructions
 1. Read the blocker report above
-2. Fix failing checks — use the CI log output in the blocker report to identify the exact error and fix it
+2. Fix failing checks — use the build errors, test failures, lint errors, and CI log output in the blocker report to identify the exact error and fix it
 3. Address review comments
 4. Do NOT commit -- the system will handle that
 4. Before finishing, reflect: did fixing these blockers reveal anything non-obvious about this codebase? If so, append to `.guild/learnings.md` in the worktree (create the `.guild/` directory and file if they don't exist).

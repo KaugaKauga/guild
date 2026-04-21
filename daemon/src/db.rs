@@ -66,6 +66,12 @@ impl Db {
             "TEXT NOT NULL DEFAULT ''",
         )?;
         Self::migrate_add_column(&conn, "pipelines", "bare_repo", "TEXT NOT NULL DEFAULT ''")?;
+        Self::migrate_add_column(
+            &conn,
+            "pipelines",
+            "verify_attempts",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         info!(path = %path.display(), "database opened");
 
@@ -112,7 +118,7 @@ impl Db {
             .prepare(
                 "SELECT issue_number, repo, stage, run_dir, worktree,
                         pr_number, blocker_fingerprint, branch_name, issue_title,
-                        bare_repo
+                        bare_repo, verify_attempts
                  FROM   pipelines",
             )
             .context("failed to prepare pipeline query")?;
@@ -139,6 +145,7 @@ impl Db {
                     branch_name: row.get(7)?,
                     issue_title: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                     bare_repo: PathBuf::from(row.get::<_, Option<String>>(9)?.unwrap_or_default()),
+                    verify_attempts: row.get::<_, Option<u8>>(10)?.unwrap_or(0),
                 })
             })
             .context("failed to query pipelines")?;
@@ -187,8 +194,8 @@ impl Db {
             "INSERT INTO pipelines
                 (issue_number, repo, stage, run_dir, worktree,
                  pr_number, blocker_fingerprint, branch_name, issue_title,
-                 bare_repo)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 bare_repo, verify_attempts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(issue_number) DO UPDATE SET
                 stage               = excluded.stage,
                 run_dir             = excluded.run_dir,
@@ -197,7 +204,8 @@ impl Db {
                 blocker_fingerprint = excluded.blocker_fingerprint,
                 branch_name         = excluded.branch_name,
                 issue_title         = excluded.issue_title,
-                bare_repo           = excluded.bare_repo",
+                bare_repo           = excluded.bare_repo,
+                verify_attempts     = excluded.verify_attempts",
             params![
                 p.issue_number,
                 p.repo,
@@ -209,6 +217,7 @@ impl Db {
                 p.branch_name,
                 p.issue_title,
                 p.bare_repo.to_string_lossy().as_ref(),
+                p.verify_attempts,
             ],
         )
         .context("failed to upsert pipeline")?;
@@ -341,8 +350,8 @@ impl Db {
                     "INSERT OR IGNORE INTO pipelines
                         (issue_number, repo, stage, run_dir, worktree,
                          pr_number, blocker_fingerprint, branch_name, issue_title,
-                         bare_repo)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                         bare_repo, verify_attempts)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         p.issue_number,
                         p.repo,
@@ -354,6 +363,7 @@ impl Db {
                         p.branch_name,
                         p.issue_title,
                         p.bare_repo.to_string_lossy().as_ref(),
+                        p.verify_attempts,
                     ],
                 )
                 .context("failed to migrate active pipeline")?;
