@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
@@ -205,75 +205,121 @@ pub async fn fetch_issue_detail(repo: &str, number: u64) -> Result<Issue> {
     Ok(issue)
 }
 
-/// Shallow-clone  into .
-pub async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
-    let dest_str = dest
+/// Ensure a bare clone of `repo` exists at `repos_dir/<owner>-<repo>.git`.
+///
+/// If the bare repo already exists, runs `git fetch --prune origin` to update
+/// it. Otherwise, creates it with `gh repo clone ... -- --bare`.
+/// Returns the path to the bare repo directory.
+pub async fn ensure_bare_repo(repo: &str, repos_dir: &Path) -> Result<PathBuf> {
+    let bare_name = format!("{}.git", repo.replace('/', "-"));
+    let bare_path = repos_dir.join(&bare_name);
+    let bare_str = bare_path
         .to_str()
-        .context("clone_repo: destination path is not valid UTF-8")?;
+        .context("ensure_bare_repo: bare repo path is not valid UTF-8")?
+        .to_string();
 
-    run_gh(&[
-        "repo",
-        "clone",
-        repo,
-        dest_str,
-        "--",
-        "--depth=1",
-        "--single-branch",
-    ])
-    .await
-    .context("clone_repo")?;
+    if bare_path.exists() {
+        // Already cloned — fetch latest refs.
+        tracing::info!(path = %bare_path.display(), "bare repo exists, fetching updates");
+        if let Err(e) = run_git(&["fetch", "--prune", "origin"], &bare_path).await {
+            tracing::warn!("bare repo fetch failed (will continue): {:#}", e);
+        }
+    } else {
+        // Clone as bare.
+        tracing::info!(repo, path = %bare_path.display(), "cloning bare repo");
+        run_gh(&["repo", "clone", repo, &bare_str, "--", "--bare"])
+            .await
+            .context("ensure_bare_repo: failed to clone bare repo")?;
+    }
+
+    Ok(bare_path)
+}
+
+/// Create a git worktree at `worktree_dest` with branch `branch`.
+///
+/// If the branch already exists on origin, the worktree is based on
+/// `origin/<branch>` (using `-B` to reset it). Otherwise, a new branch is
+/// created from HEAD (the default branch).
+pub async fn add_worktree(bare_repo: &Path, worktree_dest: &Path, branch: &str) -> Result<()> {
+    let dest_str = worktree_dest
+        .to_str()
+        .context("add_worktree: worktree path is not valid UTF-8")?;
+
+    // Check if the branch exists on origin.
+    let remote_ref = format!("origin/{}", branch);
+    let branch_on_remote = run_git(&["rev-parse", "--verify", &remote_ref], bare_repo)
+        .await
+        .is_ok();
+
+    if branch_on_remote {
+        // Branch exists on remote — base worktree on it (reset with -B).
+        run_git(
+            &["worktree", "add", dest_str, "-B", branch, &remote_ref],
+            bare_repo,
+        )
+        .await
+        .context("add_worktree: failed to add worktree from remote branch")?;
+        tracing::info!(branch, "worktree created from existing remote branch");
+    } else {
+        // New branch — create from HEAD (default branch).
+        run_git(&["worktree", "add", dest_str, "-b", branch], bare_repo)
+            .await
+            .context("add_worktree: failed to add worktree with new branch")?;
+        tracing::info!(branch, "worktree created with new branch");
+    }
+
+    // Configure user identity in the worktree so commits work.
+    let _ = run_git(
+        &["config", "user.email", "guild@users.noreply.github.com"],
+        worktree_dest,
+    )
+    .await;
+    let _ = run_git(&["config", "user.name", "Guild"], worktree_dest).await;
 
     Ok(())
 }
 
-/// Check out an existing remote branch, or create a new local branch if it
-/// does not exist on the remote.
-///
-/// This avoids the situation where a fresh shallow clone tries to create a
-/// branch that already exists on origin, which would later cause a push
-/// rejection.
-pub async fn checkout_or_create_branch(worktree: &Path, branch: &str) -> Result<()> {
-    // 1. Check if we are already on the target branch.
-    if let Ok(current) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], worktree).await {
-        if current.trim() == branch {
-            tracing::info!("already on branch: {}", branch);
-            return Ok(());
+/// Remove a git worktree. Falls back to `fs::remove_dir_all` + `git worktree
+/// prune` if the git command fails.
+pub async fn remove_worktree(bare_repo: &Path, worktree_dest: &Path) -> Result<()> {
+    let dest_str = worktree_dest
+        .to_str()
+        .context("remove_worktree: worktree path is not valid UTF-8")?;
+
+    let result = run_git(&["worktree", "remove", "--force", dest_str], bare_repo).await;
+
+    if result.is_err() {
+        tracing::warn!(
+            path = %worktree_dest.display(),
+            "git worktree remove failed, falling back to rm + prune"
+        );
+        if worktree_dest.exists() {
+            std::fs::remove_dir_all(worktree_dest)
+                .with_context(|| format!("failed to remove worktree at {}", worktree_dest.display()))?;
         }
+        let _ = run_git(&["worktree", "prune"], bare_repo).await;
     }
 
-    // 2. Check if the branch exists locally.
-    let ref_spec = format!("refs/heads/{}", branch);
-    if run_git(&["rev-parse", "--verify", &ref_spec], worktree)
-        .await
-        .is_ok()
-    {
-        run_git(&["checkout", branch], worktree)
-            .await
-            .context("checkout_or_create_branch: failed to checkout existing local branch")?;
-        tracing::info!("checked out existing local branch: {}", branch);
-        return Ok(());
-    }
-
-    // 3. Try to fetch from origin (with depth=1 to handle shallow clones).
-    let fetch_result = run_git(&["fetch", "--depth=1", "origin", branch], worktree).await;
-
-    if fetch_result.is_ok() {
-        // Branch exists on remote — check it out. Use FETCH_HEAD which is
-        // always valid after a successful fetch, even in shallow clones where
-        // origin/<branch> may not resolve as a commit.
-        run_git(&["checkout", "-b", branch, "FETCH_HEAD"], worktree)
-            .await
-            .context("checkout_or_create_branch: failed to checkout existing remote branch")?;
-        tracing::info!("checked out existing remote branch: {}", branch);
-    } else {
-        // Branch does not exist on remote — create a new one.
-        run_git(&["checkout", "-b", branch], worktree)
-            .await
-            .context("checkout_or_create_branch: failed to create new branch")?;
-        tracing::info!("created new branch: {}", branch);
-    }
-
+    tracing::info!(path = %worktree_dest.display(), "worktree removed");
     Ok(())
+}
+
+/// Resolve the actual `.git` directory for a worktree path.
+///
+/// In a worktree layout, `.git` is a file that points to the main repo's
+/// `.git/worktrees/<name>/` directory. This helper returns the actual git dir
+/// so lock files can be found correctly.
+pub async fn resolve_git_dir(worktree: &Path) -> Result<PathBuf> {
+    let output = run_git(&["rev-parse", "--git-dir"], worktree)
+        .await
+        .context("resolve_git_dir")?;
+    let git_dir = output.trim();
+    let path = std::path::Path::new(git_dir);
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(worktree.join(path))
+    }
 }
 
 /// Stage everything and commit with the given message.
@@ -308,17 +354,13 @@ pub async fn commit_all(worktree: &Path, message: &str) -> Result<()> {
     Ok(())
 }
 
-/// Push  to origin, setting upstream tracking.
+/// Push `branch` to origin, setting upstream tracking.
 ///
-/// Fetches the remote branch first so that `--force-with-lease` has accurate
-/// tracking info (shallow clones and FETCH_HEAD checkouts often leave it stale).
+/// Tries `--force-with-lease` first (safe default). Falls back to `--force`
+/// if tracking info is stale. Safe because guild owns these branches exclusively.
 pub async fn push_branch(worktree: &Path, branch: &str) -> Result<()> {
     // Refresh remote tracking info so --force-with-lease has accurate state.
     let _ = run_git(&["fetch", "origin", branch], worktree).await;
-
-    // Try --force-with-lease first (safe default). If it fails due to stale
-    // tracking info (common with shallow clones), fall back to --force.
-    // This is safe because guild owns these branches exclusively.
     let result = run_git(
         &["push", "--force-with-lease", "-u", "origin", branch],
         worktree,
@@ -646,5 +688,20 @@ mod tests {
             r#"{"number":1,"title":"t","body":"b","state":"OPEN","labels":[],"comments":[]}"#;
         let issue: Issue = serde_json::from_str(json).unwrap();
         assert!(issue.id.is_none());
+    }
+
+    #[test]
+    fn test_bare_repo_name_computation() {
+        // Verify the naming convention used by ensure_bare_repo.
+        let repo = "owner/repo";
+        let bare_name = format!("{}.git", repo.replace('/', "-"));
+        assert_eq!(bare_name, "owner-repo.git");
+    }
+
+    #[test]
+    fn test_bare_repo_name_with_org() {
+        let repo = "my-org/my-repo";
+        let bare_name = format!("{}.git", repo.replace('/', "-"));
+        assert_eq!(bare_name, "my-org-my-repo.git");
     }
 }

@@ -32,7 +32,7 @@ INGEST ─▶ UNDERSTAND ─▶ PLAN ─▶ IMPLEMENT ─▶ VERIFY ─▶ SUBMI
 | Stage | Who runs it | What happens |
 |-------|-------------|--------------|
 | **INGEST** | Daemon | Fetches the issue body, metadata, comments, and linked issues via `gh`. Saves everything as JSON + markdown into the run directory. |
-| **UNDERSTAND** | Daemon | Shallow-clones the repo. Scans for CI workflows, contributing docs, dependency manifests. Reads `.guild/learnings.md` for repo-specific agent knowledge. Builds a directory tree. Creates a working branch (`guild/issue-{N}`). |
+| **UNDERSTAND** | Daemon | Ensures a shared bare clone of the repo exists (or fetches updates). Creates a git worktree with the working branch (`guild/issue-{N}`). Scans for CI workflows, contributing docs, dependency manifests. Reads `.guild/learnings.md` for repo-specific agent knowledge. Builds a directory tree. |
 | **PLAN** | Copilot | Reads the issue + repo summary. Produces `plan.md` — which files to touch, what tests to write, what UI wiring is needed. |
 | **IMPLEMENT** | Copilot | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. Appends any repo-specific learnings to `.guild/learnings.md`. |
 | **VERIFY** | Copilot | Runs linting and basic checks. Fixes lint errors. Does **not** run full test suites that might hang (watch mode, browser tests). Trusts CI for that. |
@@ -118,6 +118,7 @@ Comments without `@guild` are left alone.
 | `--poll-interval` / `-p` | `30` | Seconds between polling cycles |
 | `--copilot-cmd` | `copilot` | Path or name of the Copilot CLI binary |
 | `--runs-dir` | `./runs` | Where run artifacts and worktrees are stored |
+| `--repos-dir` | `./repos` | Where shared bare clones are stored (one per repo) |
 
 ## Architecture
 
@@ -136,6 +137,8 @@ guild/
     implement.md
     verify.md
     fix.md
+  repos/                      # Shared bare clones (one per repo, gitignored)
+    owner-repo.git/           # Bare clone — shared object store
   runs/                       # Per-run artifacts (gitignored)
     guild.db                  # SQLite database (pipelines + completed ledger)
     {timestamp}-{repo}-{issue}/
@@ -148,7 +151,7 @@ guild/
       blocker_report.md       # What's blocking the PR
       learnings.md            # Repo-specific learnings (copied from worktree)
       prompt_*.md             # Generated prompts for each stage
-      worktree/               # Shallow clone of the repo (working branch)
+      worktree/               # Git worktree (shares object store with bare clone)
 ```
 
 ### State persistence

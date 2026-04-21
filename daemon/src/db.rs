@@ -41,6 +41,7 @@ impl Db {
                 stage               TEXT NOT NULL,
                 run_dir             TEXT NOT NULL,
                 worktree            TEXT NOT NULL,
+                bare_repo           TEXT NOT NULL DEFAULT '',
                 pr_number           INTEGER,
                 blocker_fingerprint TEXT,
                 branch_name         TEXT NOT NULL,
@@ -58,17 +59,18 @@ impl Db {
         .context("failed to create database tables")?;
 
         // --- Schema migrations ------------------------------------------------
-        // CREATE TABLE IF NOT EXISTS won't alter an existing table, so we must
-        // check for columns that were added after the initial schema and add
-        // them with ALTER TABLE if missing.
         Self::migrate_add_column(
             &conn,
             "pipelines",
             "issue_title",
             "TEXT NOT NULL DEFAULT ''",
         )?;
-        // Add future column migrations here following the same pattern.
-        // ----------------------------------------------------------------------
+        Self::migrate_add_column(
+            &conn,
+            "pipelines",
+            "bare_repo",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
 
         info!(path = %path.display(), "database opened");
 
@@ -114,7 +116,8 @@ impl Db {
         let mut stmt = conn
             .prepare(
                 "SELECT issue_number, repo, stage, run_dir, worktree,
-                        pr_number, blocker_fingerprint, branch_name, issue_title
+                        pr_number, blocker_fingerprint, branch_name, issue_title,
+                        bare_repo
                  FROM   pipelines",
             )
             .context("failed to prepare pipeline query")?;
@@ -140,6 +143,7 @@ impl Db {
                     blocker_fingerprint: row.get(6)?,
                     branch_name: row.get(7)?,
                     issue_title: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    bare_repo: PathBuf::from(row.get::<_, Option<String>>(9)?.unwrap_or_default()),
                 })
             })
             .context("failed to query pipelines")?;
@@ -187,8 +191,9 @@ impl Db {
         conn.execute(
             "INSERT INTO pipelines
                 (issue_number, repo, stage, run_dir, worktree,
-                 pr_number, blocker_fingerprint, branch_name, issue_title)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 pr_number, blocker_fingerprint, branch_name, issue_title,
+                 bare_repo)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(issue_number) DO UPDATE SET
                 stage               = excluded.stage,
                 run_dir             = excluded.run_dir,
@@ -196,7 +201,8 @@ impl Db {
                 pr_number           = excluded.pr_number,
                 blocker_fingerprint = excluded.blocker_fingerprint,
                 branch_name         = excluded.branch_name,
-                issue_title         = excluded.issue_title",
+                issue_title         = excluded.issue_title,
+                bare_repo           = excluded.bare_repo",
             params![
                 p.issue_number,
                 p.repo,
@@ -207,6 +213,7 @@ impl Db {
                 p.blocker_fingerprint,
                 p.branch_name,
                 p.issue_title,
+                p.bare_repo.to_string_lossy().as_ref(),
             ],
         )
         .context("failed to upsert pipeline")?;
@@ -338,8 +345,9 @@ impl Db {
                 tx.execute(
                     "INSERT OR IGNORE INTO pipelines
                         (issue_number, repo, stage, run_dir, worktree,
-                         pr_number, blocker_fingerprint, branch_name, issue_title)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                         pr_number, blocker_fingerprint, branch_name, issue_title,
+                         bare_repo)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         p.issue_number,
                         p.repo,
@@ -350,6 +358,7 @@ impl Db {
                         p.blocker_fingerprint,
                         p.branch_name,
                         p.issue_title,
+                        p.bare_repo.to_string_lossy().as_ref(),
                     ],
                 )
                 .context("failed to migrate active pipeline")?;

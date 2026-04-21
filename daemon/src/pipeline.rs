@@ -114,6 +114,7 @@ pub struct Pipeline {
     pub stage: Stage,
     pub run_dir: PathBuf,
     pub worktree: PathBuf,
+    pub bare_repo: PathBuf,
     pub pr_number: Option<u64>,
     pub blocker_fingerprint: Option<String>,
     pub branch_name: String,
@@ -124,14 +125,17 @@ impl Pipeline {
     /// Create a new pipeline for the given issue.
     ///
     /// A run directory is created under `runs_dir` with the pattern
-    /// `{timestamp}-{repo_slug}-{issue_number}`.
-    pub fn new(issue_number: u64, repo: String, runs_dir: &Path) -> Self {
+    /// `{timestamp}-{repo_slug}-{issue_number}`.  The `bare_repo` path
+    /// is computed under `repos_dir` (shared bare clone per repo).
+    pub fn new(issue_number: u64, repo: String, runs_dir: &Path, repos_dir: &Path) -> Self {
         let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let repo_slug = repo.replace('/', "-");
         let dir_name = format!("{}-{}-{}", timestamp, repo_slug, issue_number);
         let run_dir = runs_dir.join(&dir_name);
         let worktree = run_dir.join("worktree");
         let branch_name = format!("guild/issue-{}", issue_number);
+        let bare_name = format!("{}.git", repo_slug);
+        let bare_repo = repos_dir.join(&bare_name);
 
         fs::create_dir_all(&run_dir).expect("failed to create run_dir");
 
@@ -141,6 +145,7 @@ impl Pipeline {
             stage: Stage::Ingest,
             run_dir,
             worktree,
+            bare_repo,
             pr_number: None,
             blocker_fingerprint: None,
             branch_name,
@@ -188,21 +193,24 @@ impl Pipeline {
     /// Called after the pipeline has been recorded in the completed ledger.
     /// Errors are logged but not propagated -- cleanup is best-effort.
     #[allow(dead_code)]
-    pub fn cleanup_run(&self) {
-        // Remove worktree first (may be a large clone).
+    pub async fn cleanup_run(&self) {
+        // Remove worktree via git worktree remove (falls back to rm internally).
         if self.worktree.exists() {
-            if let Err(e) = fs::remove_dir_all(&self.worktree) {
-                tracing::warn!(
-                    issue = self.issue_number,
-                    path = %self.worktree.display(),
-                    "failed to remove worktree: {:#}", e
-                );
-            } else {
-                info!(
-                    issue = self.issue_number,
-                    path = %self.worktree.display(),
-                    "removed worktree"
-                );
+            match github::remove_worktree(&self.bare_repo, &self.worktree).await {
+                Ok(_) => {
+                    info!(
+                        issue = self.issue_number,
+                        path = %self.worktree.display(),
+                        "removed worktree"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        issue = self.issue_number,
+                        path = %self.worktree.display(),
+                        "failed to remove worktree: {:#}", e
+                    );
+                }
             }
         }
 
@@ -264,18 +272,32 @@ impl Pipeline {
     }
 
     pub async fn do_understand(&mut self) -> Result<bool> {
-        // Clean up stale git lock files that may have been left by a killed process.
-        let git_lock = self.worktree.join(".git/index.lock");
-        if git_lock.exists() {
-            info!("removing stale git lock file: {}", git_lock.display());
-            let _ = fs::remove_file(&git_lock);
-        }
-
-        // Clone repo into worktree if it doesn't already exist.
+        // Create worktree from bare repo if it doesn't already exist.
         if !self.worktree.exists() {
-            github::clone_repo(&self.repo, &self.worktree)
+            // Ensure bare clone exists and is up-to-date.
+            let repos_dir = self
+                .bare_repo
+                .parent()
+                .context("Understand: bare_repo has no parent directory")?;
+            let _bare = github::ensure_bare_repo(&self.repo, repos_dir)
                 .await
-                .context("Understand: failed to clone repo")?;
+                .context("Understand: failed to ensure bare repo")?;
+
+            // Create worktree with the working branch.
+            github::add_worktree(&self.bare_repo, &self.worktree, &self.branch_name)
+                .await
+                .context("Understand: failed to add worktree")?;
+        } else {
+            // Worktree already exists (e.g. daemon restart). Clean up stale
+            // lock files — in a worktree layout the git dir is different from
+            // `.git/` so we resolve it dynamically.
+            if let Ok(git_dir) = github::resolve_git_dir(&self.worktree).await {
+                let lock: PathBuf = git_dir.join("index.lock");
+                if lock.exists() {
+                    info!("removing stale git lock file: {}", lock.display());
+                    let _ = fs::remove_file(&lock);
+                }
+            }
         }
 
         // Scan for notable files.
@@ -347,11 +369,6 @@ impl Pipeline {
 
         fs::write(self.run_dir.join("repo_summary.md"), &summary)
             .context("Understand: failed to write repo_summary.md")?;
-
-        // Create branch.
-        github::checkout_or_create_branch(&self.worktree, &self.branch_name)
-            .await
-            .context("Understand: failed to checkout or create branch")?;
 
         info!("Repo understood, branch created: {}", self.branch_name);
 
@@ -472,10 +489,12 @@ impl Pipeline {
 
     pub async fn do_submit(&mut self) -> Result<bool> {
         // Clean up stale git lock file from a potentially killed process.
-        let git_lock = self.worktree.join(".git/index.lock");
-        if git_lock.exists() {
-            info!("removing stale git lock file: {}", git_lock.display());
-            let _ = fs::remove_file(&git_lock);
+        if let Ok(git_dir) = github::resolve_git_dir(&self.worktree).await {
+            let git_lock: PathBuf = git_dir.join("index.lock");
+            if git_lock.exists() {
+                info!("removing stale git lock file: {}", git_lock.display());
+                let _ = fs::remove_file(&git_lock);
+            }
         }
 
         let commit_msg = format!("guild: implement issue #{}", self.issue_number);
@@ -720,10 +739,12 @@ impl Pipeline {
 
     pub async fn do_fix(&mut self, config: &Config) -> Result<bool> {
         // Clean up stale git lock file from a potentially killed process.
-        let git_lock = self.worktree.join(".git/index.lock");
-        if git_lock.exists() {
-            info!("removing stale git lock file: {}", git_lock.display());
-            let _ = fs::remove_file(&git_lock);
+        if let Ok(git_dir) = github::resolve_git_dir(&self.worktree).await {
+            let git_lock: PathBuf = git_dir.join("index.lock");
+            if git_lock.exists() {
+                info!("removing stale git lock file: {}", git_lock.display());
+                let _ = fs::remove_file(&git_lock);
+            }
         }
 
         let blocker_report = read_file_or(

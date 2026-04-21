@@ -1,0 +1,4 @@
+- The `Pipeline` struct is serialized/deserialized with serde for both JSON (state.json migration) and SQLite persistence — any new field needs a default value or the migration path will fail for existing databases.
+- Git worktree `.git` is a file (not a directory) pointing to the main repo's `.git/worktrees/<name>/` — lock files like `index.lock` live there, not at `worktree/.git/index.lock`. Use `git rev-parse --git-dir` to resolve it.
+- The `cleanup_run()` method on Pipeline is `#[allow(dead_code)]` — actual cleanup happens in the orchestrator loop in `main.rs` via a spawned tokio task, not through this method.
+- `db.rs` migrations use `PRAGMA table_info` to detect missing columns and `ALTER TABLE` to add them — new columns must have a `DEFAULT` clause to work with existing rows.

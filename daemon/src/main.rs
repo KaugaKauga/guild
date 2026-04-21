@@ -59,6 +59,10 @@ enum Commands {
         #[arg(long, default_value = "./runs")]
         runs_dir: String,
 
+        /// Directory for shared bare clones (one per repo)
+        #[arg(long, default_value = "./repos")]
+        repos_dir: String,
+
         /// Maximum number of pipelines to advance concurrently
         #[arg(short = 'c', long, default_value_t = 5)]
         max_concurrent: usize,
@@ -89,6 +93,7 @@ pub struct Config {
     pub copilot_cmd: String,
     pub model: String,
     pub runs_dir: PathBuf,
+    pub repos_dir: PathBuf,
     pub max_concurrent: usize,
     pub agents_dir: PathBuf,
 }
@@ -106,6 +111,7 @@ async fn main() -> Result<()> {
             copilot_cmd,
             model,
             runs_dir,
+            repos_dir,
             max_concurrent,
             agents_dir,
             no_tui,
@@ -121,6 +127,7 @@ async fn main() -> Result<()> {
                 copilot_cmd,
                 model,
                 runs_dir: PathBuf::from(&runs_dir),
+                repos_dir: PathBuf::from(&repos_dir),
                 max_concurrent,
                 agents_dir: PathBuf::from(&agents_dir).canonicalize().with_context(|| {
                     format!(
@@ -205,11 +212,17 @@ fn stage_status_text(stage: &pipeline::Stage, has_running_task: bool) -> String 
 }
 
 async fn run_start(config: Config, no_tui: bool) -> Result<()> {
-    // --- ensure runs dir ---------------------------------------------------
+    // --- ensure runs dir & repos dir ---------------------------------------
     std::fs::create_dir_all(&config.runs_dir).with_context(|| {
         format!(
             "failed to create runs directory at {}",
             config.runs_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&config.repos_dir).with_context(|| {
+        format!(
+            "failed to create repos directory at {}",
+            config.repos_dir.display()
         )
     })?;
 
@@ -254,6 +267,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
     info!("  copilot_cmd    : {}", config.copilot_cmd);
     info!("  model          : {}", config.model);
     info!("  runs_dir       : {}", config.runs_dir.display());
+    info!("  repos_dir      : {}", config.repos_dir.display());
     info!("  max_concurrent : {}", config.max_concurrent);
     info!("=======================================================");
 
@@ -380,7 +394,7 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                 issue = issue.number,
                 "new issue detected, creating pipeline"
             );
-            let p = pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir);
+            let p = pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir, &config.repos_dir);
             if let Err(e) = db.upsert_pipeline(&p) {
                 error!(
                     issue = issue.number,
@@ -414,12 +428,14 @@ async fn run_start(config: Config, no_tui: bool) -> Result<()> {
                     let repo = p.repo.clone();
                     let branch = p.branch_name.clone();
                     let worktree = p.worktree.clone();
+                    let bare_repo = p.bare_repo.clone();
                     let run_dir = p.run_dir.clone();
                     let inum = p.issue_number;
                     tokio::spawn(async move {
                         github::delete_remote_branch(&repo, &branch).await;
+                        // Remove worktree via git (falls back to rm internally).
                         if worktree.exists() {
-                            if let Err(e) = std::fs::remove_dir_all(&worktree) {
+                            if let Err(e) = github::remove_worktree(&bare_repo, &worktree).await {
                                 tracing::warn!(issue = inum, "cleanup: remove worktree: {:#}", e);
                             }
                         }
