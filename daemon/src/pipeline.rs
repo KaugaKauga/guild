@@ -233,6 +233,11 @@ impl Pipeline {
             .await
             .context("Ingest: failed to fetch issue detail")?;
 
+        // React with 👀 to acknowledge the issue is being worked on.
+        if let Some(ref node_id) = issue.id {
+            github::react_with_eyes(node_id).await;
+        }
+
         // Persist the full issue JSON.
         let issue_json =
             serde_json::to_string_pretty(&issue).context("Ingest: failed to serialise issue")?;
@@ -551,6 +556,13 @@ impl Pipeline {
                 is_human && c.body.contains("@guild")
             })
             .collect();
+
+        // React with 👀 on each @guild comment to acknowledge it.
+        for c in &guild_comments {
+            if let Some(ref node_id) = c.id {
+                github::react_with_eyes(node_id).await;
+            }
+        }
 
         // Collect formal review bodies when changes are requested.
         let review_comments: Vec<&github::Review> = if status.review_decision == "CHANGES_REQUESTED"

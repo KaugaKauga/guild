@@ -19,6 +19,9 @@ pub struct Issue {
     pub labels: Vec<Label>,
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// GraphQL node ID, used for adding reactions.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -28,6 +31,9 @@ pub struct Label {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Comment {
+    /// GraphQL node ID, used for adding reactions.
+    #[serde(default)]
+    pub id: Option<String>,
     pub author: CommentAuthor,
     pub body: String,
     #[serde(rename = "createdAt")]
@@ -41,6 +47,9 @@ pub struct CommentAuthor {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrComment {
+    /// GraphQL node ID, used for adding reactions.
+    #[serde(default)]
+    pub id: Option<String>,
     pub author: CommentAuthor,
     pub body: String,
     #[serde(rename = "createdAt")]
@@ -187,7 +196,7 @@ pub async fn fetch_issue_detail(repo: &str, number: u64) -> Result<Issue> {
         "--repo",
         repo,
         "--json",
-        "number,title,body,state,labels,comments",
+        "id,number,title,body,state,labels,comments",
     ])
     .await
     .context("fetch_issue_detail")?;
@@ -520,6 +529,30 @@ pub async fn fetch_failed_check_logs(
     results
 }
 
+/// Add the 👀 (eyes) reaction to a GitHub comment or issue by its node ID.
+/// This is best-effort: failures are logged but not propagated.
+pub async fn react_with_eyes(node_id: &str) {
+    let query = format!(
+        r#"mutation {{ addReaction(input: {{subjectId: "{}", content: EYES}}) {{ reaction {{ content }} }} }}"#,
+        node_id
+    );
+    let result = run_gh(&["api", "graphql", "-f", &format!("query={}", query)]).await;
+    match result {
+        Ok(_) => tracing::info!(node_id, "added 👀 reaction"),
+        Err(e) => tracing::debug!(node_id, "failed to add 👀 reaction (best-effort): {:#}", e),
+    }
+}
+
+/// Build the GraphQL mutation query string for adding an eyes reaction.
+/// Exposed for testing.
+#[cfg(test)]
+fn build_eyes_reaction_query(node_id: &str) -> String {
+    format!(
+        r#"mutation {{ addReaction(input: {{subjectId: "{}", content: EYES}}) {{ reaction {{ content }} }} }}"#,
+        node_id
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,5 +607,44 @@ mod tests {
         assert!(log.len() > MAX_LOG_BYTES);
         let result = truncate_log(&log);
         assert!(result.len() <= MAX_LOG_BYTES + 20); // +20 for the truncation prefix
+    }
+
+    #[test]
+    fn test_build_eyes_reaction_query() {
+        let query = build_eyes_reaction_query("IC_kwDOTest123");
+        assert!(query.contains("IC_kwDOTest123"));
+        assert!(query.contains("addReaction"));
+        assert!(query.contains("EYES"));
+        assert!(query.contains("subjectId"));
+    }
+
+    #[test]
+    fn test_comment_deserializes_with_id() {
+        let json = r#"{"id":"IC_kwDOTest","author":{"login":"user"},"body":"hello","createdAt":"2025-01-01T00:00:00Z"}"#;
+        let comment: Comment = serde_json::from_str(json).unwrap();
+        assert_eq!(comment.id.as_deref(), Some("IC_kwDOTest"));
+    }
+
+    #[test]
+    fn test_comment_deserializes_without_id() {
+        let json =
+            r#"{"author":{"login":"user"},"body":"hello","createdAt":"2025-01-01T00:00:00Z"}"#;
+        let comment: Comment = serde_json::from_str(json).unwrap();
+        assert!(comment.id.is_none());
+    }
+
+    #[test]
+    fn test_issue_deserializes_with_node_id() {
+        let json = r#"{"id":"I_kwDOTest","number":1,"title":"t","body":"b","state":"OPEN","labels":[],"comments":[]}"#;
+        let issue: Issue = serde_json::from_str(json).unwrap();
+        assert_eq!(issue.id.as_deref(), Some("I_kwDOTest"));
+    }
+
+    #[test]
+    fn test_issue_deserializes_without_node_id() {
+        let json =
+            r#"{"number":1,"title":"t","body":"b","state":"OPEN","labels":[],"comments":[]}"#;
+        let issue: Issue = serde_json::from_str(json).unwrap();
+        assert!(issue.id.is_none());
     }
 }
