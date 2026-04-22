@@ -44,9 +44,22 @@ impl Backend {
 
     /// Default model identifier if the user did not pass `--model`.
     pub fn default_model(self) -> &'static str {
+        self.default_planning_model()
+    }
+
+    /// Default model for the Plan stage (expensive, high-quality reasoning).
+    pub fn default_planning_model(self) -> &'static str {
         match self {
             Backend::Copilot => "claude-opus-4.6",
             Backend::Claude => "claude-opus-4-7",
+        }
+    }
+
+    /// Default model for Implement, Verify, and Fix stages (cheaper, fast).
+    pub fn default_coding_model(self) -> &'static str {
+        match self {
+            Backend::Copilot => "claude-sonnet-4.6",
+            Backend::Claude => "claude-sonnet-4-6",
         }
     }
 }
@@ -237,4 +250,52 @@ fn read_tail(path: &Path, n: usize) -> String {
     let lines: Vec<&str> = buf.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copilot_default_planning_model_is_opus() {
+        let model = Backend::Copilot.default_planning_model();
+        assert!(model.contains("opus"), "planning model should be opus, got: {model}");
+    }
+
+    #[test]
+    fn copilot_default_coding_model_is_sonnet() {
+        let model = Backend::Copilot.default_coding_model();
+        assert!(model.contains("sonnet"), "coding model should be sonnet, got: {model}");
+    }
+
+    #[test]
+    fn claude_default_planning_model_is_opus() {
+        let model = Backend::Claude.default_planning_model();
+        assert!(model.contains("opus"), "planning model should be opus, got: {model}");
+    }
+
+    #[test]
+    fn claude_default_coding_model_is_sonnet() {
+        let model = Backend::Claude.default_coding_model();
+        assert!(model.contains("sonnet"), "coding model should be sonnet, got: {model}");
+    }
+
+    #[test]
+    fn default_model_matches_planning_model() {
+        // default_model() is a legacy alias for the planning model
+        assert_eq!(Backend::Copilot.default_model(), Backend::Copilot.default_planning_model());
+        assert_eq!(Backend::Claude.default_model(), Backend::Claude.default_planning_model());
+    }
+
+    #[test]
+    fn planning_and_coding_models_differ() {
+        assert_ne!(
+            Backend::Copilot.default_planning_model(),
+            Backend::Copilot.default_coding_model(),
+        );
+        assert_ne!(
+            Backend::Claude.default_planning_model(),
+            Backend::Claude.default_coding_model(),
+        );
+    }
 }

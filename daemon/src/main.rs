@@ -57,9 +57,17 @@ enum Commands {
         #[arg(long, alias = "copilot-cmd")]
         agent_cmd: Option<String>,
 
-        /// AI model to use. Defaults to a sensible model per backend if unset.
+        /// AI model for all stages (overrides --planning-model and --coding-model).
         #[arg(short = 'm', long)]
         model: Option<String>,
+
+        /// AI model for the Plan stage. Defaults to an opus-class model.
+        #[arg(long)]
+        planning_model: Option<String>,
+
+        /// AI model for Implement, Verify, and Fix stages. Defaults to a sonnet-class model.
+        #[arg(long)]
+        coding_model: Option<String>,
 
         /// Directory where run artifacts are stored
         #[arg(long, default_value = "./runs")]
@@ -98,7 +106,8 @@ pub struct Config {
     pub poll_interval: u64,
     pub backend: Backend,
     pub agent_cmd: String,
-    pub model: String,
+    pub planning_model: String,
+    pub coding_model: String,
     pub runs_dir: PathBuf,
     pub repos_dir: PathBuf,
     pub max_concurrent: usize,
@@ -118,6 +127,8 @@ async fn main() -> Result<()> {
             backend,
             agent_cmd,
             model,
+            planning_model,
+            coding_model,
             runs_dir,
             repos_dir,
             max_concurrent,
@@ -129,7 +140,15 @@ async fn main() -> Result<()> {
                 .expect("repo is required: familiar start <owner/repo>");
 
             let agent_cmd = agent_cmd.unwrap_or_else(|| backend.default_cmd().to_string());
-            let model = model.unwrap_or_else(|| backend.default_model().to_string());
+
+            // --model overrides both; otherwise per-stage defaults apply.
+            let planning_model = model
+                .clone()
+                .or(planning_model)
+                .unwrap_or_else(|| backend.default_planning_model().to_string());
+            let coding_model = model
+                .or(coding_model)
+                .unwrap_or_else(|| backend.default_coding_model().to_string());
 
             let config = Config {
                 repo,
@@ -137,7 +156,8 @@ async fn main() -> Result<()> {
                 poll_interval,
                 backend,
                 agent_cmd,
-                model,
+                planning_model,
+                coding_model,
                 runs_dir: PathBuf::from(&runs_dir),
                 repos_dir: PathBuf::from(&repos_dir),
                 max_concurrent,
@@ -293,7 +313,8 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     info!("  poll_interval  : {}s", config.poll_interval);
     info!("  backend        : {}", config.backend);
     info!("  agent_cmd      : {}", config.agent_cmd);
-    info!("  model          : {}", config.model);
+    info!("  planning_model : {}", config.planning_model);
+    info!("  coding_model   : {}", config.coding_model);
     info!("  runs_dir       : {}", config.runs_dir.display());
     info!("  repos_dir      : {}", config.repos_dir.display());
     info!("  max_concurrent : {}", config.max_concurrent);
