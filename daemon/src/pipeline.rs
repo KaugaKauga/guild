@@ -32,6 +32,12 @@ pub fn load_agent_prompt(
         prompt = prompt.replace(&placeholder, value);
     }
 
+    // Prepend caveman token-compression instructions if available.
+    let caveman_path = agents_dir.join("caveman.md");
+    if let Ok(caveman) = fs::read_to_string(&caveman_path) {
+        prompt = format!("{caveman}\n\n---\n\n{prompt}");
+    }
+
     Ok(prompt)
 }
 
@@ -1111,6 +1117,38 @@ mod tests {
 
         let missing = dir.join("nonexistent.md");
         assert_eq!(parse_verify_verdict(&missing), VerifyVerdict::Fail);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_agent_prompt_prepends_caveman() {
+        let dir = std::env::temp_dir().join("familiar_test_caveman");
+        let _ = fs::create_dir_all(&dir);
+
+        fs::write(dir.join("plan.md"), "Plan for: {issue}").unwrap();
+        fs::write(dir.join("caveman.md"), "Respond terse.").unwrap();
+
+        let result = load_agent_prompt(&dir, "plan", &[("issue", "test bug")]).unwrap();
+
+        assert!(result.starts_with("Respond terse."));
+        assert!(result.contains("---"));
+        assert!(result.contains("Plan for: test bug"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_agent_prompt_works_without_caveman() {
+        let dir = std::env::temp_dir().join("familiar_test_no_caveman");
+        let _ = fs::create_dir_all(&dir);
+
+        fs::write(dir.join("plan.md"), "Plan for: {issue}").unwrap();
+        // No caveman.md — should work fine without it.
+
+        let result = load_agent_prompt(&dir, "plan", &[("issue", "test bug")]).unwrap();
+
+        assert_eq!(result, "Plan for: test bug");
 
         let _ = fs::remove_dir_all(&dir);
     }
