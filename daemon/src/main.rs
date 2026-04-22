@@ -11,10 +11,8 @@ use clap::{Parser, Subcommand};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{error, info};
-
-use tui::{DaemonState, PipelineSnapshot};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -199,30 +197,6 @@ fn run_status(runs_dir: &str) -> Result<()> {
 // `familiar start` — main daemon with TUI
 // ---------------------------------------------------------------------------
 
-/// Generate a brief status description for the TUI based on the pipeline
-/// stage and whether an agent task is currently running for it.
-fn stage_status_text(stage: &pipeline::Stage, has_running_task: bool) -> String {
-    use pipeline::Stage;
-    if has_running_task && stage.needs_agent() {
-        return "agent running…".into();
-    }
-    match stage {
-        Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix => {
-            if has_running_task {
-                "agent running…".into()
-            } else {
-                "waiting for slot…".into()
-            }
-        }
-        Stage::Ingest => "fetching issue…".into(),
-        Stage::Understand => "analyzing…".into(),
-        Stage::Submit => "pushing PR…".into(),
-        Stage::Watch => "watching CI…".into(),
-        Stage::Done => "complete".into(),
-        Stage::Failed(_) => "failed".into(),
-    }
-}
-
 async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     // --- ensure runs dir & repos dir ---------------------------------------
     std::fs::create_dir_all(&config.runs_dir).with_context(|| {
@@ -316,15 +290,18 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     // --- graceful shutdown flag --------------------------------------------
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // --- TUI state channel -------------------------------------------------
-    let initial_state = DaemonState {
-        pipelines: Vec::new(),
-        last_poll: None,
-        cycle_count: 0,
-        repo: config.repo.clone(),
-        poll_interval: config.poll_interval,
-    };
-    let (state_tx, state_rx) = tokio::sync::watch::channel(initial_state);
+    // --- concurrency primitives --------------------------------------------
+    // The semaphore only gates agent tasks.  Orchestrator stages
+    // (Ingest, Understand, Submit, Watch) run without a permit.
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
+
+    // JoinSet for background tasks.  Each task does exactly ONE stage and
+    // exits, returning its issue number so the orchestrator can advance it.
+    let mut join_set = tokio::task::JoinSet::<(u64, std::result::Result<bool, String>)>::new();
+
+    // Set of issue numbers that currently have a spawned task in the JoinSet.
+    // Shared with the TUI so it can show "agent running…" vs "waiting…".
+    let running: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // --- spawn TUI (or ctrl-c handler for --no-tui) ------------------------
     if no_tui {
@@ -337,35 +314,26 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
             shutdown_hook.store(true, Ordering::SeqCst);
         });
     } else {
+        let db_for_tui = db.clone();
+        let running_for_tui = Arc::clone(&running);
+        let repo = config.repo.clone();
+        let poll_interval = config.poll_interval;
         let shutdown_tui = Arc::clone(&shutdown);
         tokio::spawn(async move {
-            if let Err(e) = tui::run_tui(state_rx, shutdown_tui).await {
+            if let Err(e) =
+                tui::run_tui(db_for_tui, running_for_tui, repo, poll_interval, shutdown_tui).await
+            {
                 eprintln!("TUI error: {}", e);
             }
         });
     }
 
-    // --- concurrency primitives --------------------------------------------
-    // The semaphore only gates agent tasks.  Orchestrator stages
-    // (Ingest, Understand, Submit, Watch) run without a permit.
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
-
-    // JoinSet for background tasks.  Each task does exactly ONE stage and
-    // exits, returning its issue number so the orchestrator can advance it.
-    let mut join_set = tokio::task::JoinSet::<(u64, std::result::Result<bool, String>)>::new();
-
-    // Set of issue numbers that currently have a spawned task in the JoinSet.
-    let mut running: HashSet<u64> = HashSet::new();
-
     // --- main orchestrator loop --------------------------------------------
-    let mut cycle_count: u64 = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             info!("shutdown flag set, breaking out of main loop");
             break;
         }
-
-        cycle_count += 1;
 
         // -- 1. Reap completed tasks (before anything else) -----------------
         // Tasks that finished since the last tick get processed first so
@@ -373,7 +341,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
         while let Some(result) = join_set.try_join_next() {
             match result {
                 Ok((issue_number, task_result)) => {
-                    running.remove(&issue_number);
+                    running.lock().unwrap().remove(&issue_number);
                     match task_result {
                         Ok(true) => {
                             info!(issue = issue_number, "task completed, stage advanced");
@@ -448,7 +416,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
         // -- 5. Housekeeping: complete Done, remove stale Failed ------------
         let mut housekeeping_keys: Vec<u64> = Vec::new();
         for (&issue_number, p) in &pipelines {
-            if running.contains(&issue_number) {
+            if running.lock().unwrap().contains(&issue_number) {
                 continue;
             }
             if p.is_done() {
@@ -506,7 +474,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
 
         // --- Pass 1: WATCH (inline) ----------------------------------------
         for &key in &keys {
-            if running.contains(&key) {
+            if running.lock().unwrap().contains(&key) {
                 continue;
             }
             let is_watch = pipelines
@@ -541,31 +509,9 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
             }
         }
 
-        // --- Mid-cycle TUI refresh after WATCH processing ------------------
-        // This ensures all WATCH-stage pipelines are visible immediately,
-        // before long-running agent tasks are spawned.
-        if let Ok(all) = db.get_all_active_pipelines() {
-            let now = chrono::Utc::now();
-            state_tx.send_modify(|state| {
-                state.pipelines = all
-                    .values()
-                    .map(|p| PipelineSnapshot {
-                        issue_number: p.issue_number,
-                        issue_title: p.issue_title.clone(),
-                        stage: p.stage.clone(),
-                        branch_name: p.branch_name.clone(),
-                        pr_number: p.pr_number,
-                        status_text: stage_status_text(&p.stage, running.contains(&p.issue_number)),
-                    })
-                    .collect();
-                state.last_poll = Some(now);
-                state.cycle_count = cycle_count;
-            });
-        }
-
         // --- Pass 2: Agent & Orchestrator stages (spawned) -----------------
         for key in keys {
-            if running.contains(&key) {
+            if running.lock().unwrap().contains(&key) {
                 continue;
             }
 
@@ -587,7 +533,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
                 | pipeline::Stage::Implement
                 | pipeline::Stage::Verify
                 | pipeline::Stage::Fix => {
-                    running.insert(key);
+                    running.lock().unwrap().insert(key);
                     let cfg = config.clone();
                     let sem = Arc::clone(&semaphore);
                     let db_handle = db.clone();
@@ -631,7 +577,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
                 // -- Orchestrator stages: spawn lightweight task -------------
                 // No semaphore needed — these don't invoke the agent CLI.
                 pipeline::Stage::Ingest | pipeline::Stage::Understand | pipeline::Stage::Submit => {
-                    running.insert(key);
+                    running.lock().unwrap().insert(key);
                     let cfg = config.clone();
                     let db_handle = db.clone();
                     join_set.spawn(async move {
@@ -673,29 +619,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
             }
         }
 
-        // -- 7. TUI refresh from database (single source of truth) ----------
-        // Final refresh after all spawned tasks have been kicked off,
-        // so the `running` set is up-to-date for status text.
-        if let Ok(all) = db.get_all_active_pipelines() {
-            let now = chrono::Utc::now();
-            state_tx.send_modify(|state| {
-                state.pipelines = all
-                    .values()
-                    .map(|p| PipelineSnapshot {
-                        issue_number: p.issue_number,
-                        issue_title: p.issue_title.clone(),
-                        stage: p.stage.clone(),
-                        branch_name: p.branch_name.clone(),
-                        pr_number: p.pr_number,
-                        status_text: stage_status_text(&p.stage, running.contains(&p.issue_number)),
-                    })
-                    .collect();
-                state.last_poll = Some(now);
-                state.cycle_count = cycle_count;
-            });
-        }
-
-        // -- 8. Check for shutdown before sleeping --------------------------
+        // -- 7. Check for shutdown before sleeping --------------------------
         if shutdown.load(Ordering::SeqCst) {
             info!("shutdown flag set, breaking out of main loop");
             break;
@@ -703,7 +627,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
 
         info!(
             seconds = config.poll_interval,
-            running = running.len(),
+            running = running.lock().unwrap().len(),
             "sleeping until next poll cycle"
         );
         tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)).await;

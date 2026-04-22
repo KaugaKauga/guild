@@ -1,14 +1,14 @@
 //! Terminal UI dashboard for the Familiar daemon.
 //!
 //! Renders a live table of active pipelines showing issue number, stage,
-//! progress bar, and branch name.  Your familiar's scrying glass — driven
-//! by a `tokio::sync::watch` channel that receives `DaemonState` updates
-//! from the main daemon loop.
+//! progress bar, and branch name. Queries the database on each 200 ms tick
+//! so the display always reflects current state — no snapshot layer.
 
+use std::collections::HashSet;
 use std::io::{self, stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use crossterm::terminal::{
@@ -24,140 +24,92 @@ use ratatui::Terminal;
 
 use futures::StreamExt;
 
-use crate::pipeline::Stage;
-
-// ---------------------------------------------------------------------------
-// Shared state types
-// ---------------------------------------------------------------------------
-
-/// Snapshot of a single pipeline for TUI rendering.
-#[derive(Clone, Debug)]
-pub struct PipelineSnapshot {
-    pub issue_number: u64,
-    pub issue_title: String,
-    pub stage: Stage,
-    pub branch_name: String,
-    pub pr_number: Option<u64>,
-    /// Brief status text shown in the TUI (e.g. "agent running…").
-    pub status_text: String,
-}
-
-/// Full daemon state sent to the TUI on each cycle.
-#[derive(Clone, Debug)]
-pub struct DaemonState {
-    pub pipelines: Vec<PipelineSnapshot>,
-    pub last_poll: Option<chrono::DateTime<chrono::Utc>>,
-    pub cycle_count: u64,
-    pub repo: String,
-    pub poll_interval: u64,
-}
-
-impl Default for DaemonState {
-    fn default() -> Self {
-        Self {
-            pipelines: Vec::new(),
-            last_poll: None,
-            cycle_count: 0,
-            repo: String::new(),
-            poll_interval: 30,
-        }
-    }
-}
+use crate::db::Db;
+use crate::pipeline::{Pipeline, Stage};
 
 // ---------------------------------------------------------------------------
 // TUI runner
 // ---------------------------------------------------------------------------
 
-/// Run the TUI render loop.  Blocks until the user presses `q` or the
+/// Run the TUI render loop. Blocks until the user presses `q` or the
 /// shutdown flag is set externally.
+///
+/// Queries the database every 200 ms directly, so the display is always
+/// current — there is no intermediate snapshot or watch channel.
 pub async fn run_tui(
-    state_rx: tokio::sync::watch::Receiver<DaemonState>,
+    db: Db,
+    running: Arc<Mutex<HashSet<u64>>>,
+    repo: String,
+    poll_interval: u64,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<()> {
-    // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = render_loop(&mut terminal, state_rx, &shutdown).await;
+    let result =
+        render_loop(&mut terminal, &db, &running, &repo, poll_interval, &shutdown).await;
 
-    // Restore terminal
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
     result
 }
 
-/// Returns true if any pipeline is in an active (non-terminal) stage.
-pub fn has_active_pipelines(state: &DaemonState) -> bool {
-    state
-        .pipelines
-        .iter()
-        .any(|p| !matches!(p.stage, Stage::Done | Stage::Failed(_)))
-}
-
-/// Compute the "last poll" display text, returning the seconds value for caching.
-pub fn format_last_poll(last_poll: Option<chrono::DateTime<chrono::Utc>>) -> (Option<i64>, String) {
-    match last_poll {
-        Some(t) => {
-            let secs = chrono::Utc::now().signed_duration_since(t).num_seconds();
-            (Some(secs), format!("last poll: {}s ago", secs))
-        }
-        None => (None, "last poll: —".to_string()),
-    }
-}
+// ---------------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------------
 
 async fn render_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mut state_rx: tokio::sync::watch::Receiver<DaemonState>,
+    db: &Db,
+    running: &Arc<Mutex<HashSet<u64>>>,
+    repo: &str,
+    poll_interval: u64,
     shutdown: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut scroll_offset: usize = 0;
     let mut tick: usize = 0;
     let mut event_stream = EventStream::new();
-    let mut spinner_interval = tokio::time::interval(Duration::from_millis(200));
+    let mut refresh_interval = tokio::time::interval(Duration::from_millis(200));
 
-    // Cache for the "last poll: Xs ago" text to avoid per-frame diffs
-    let mut cached_poll_secs: Option<i64>;
-    let mut cached_poll_text: String;
+    // Local pipeline cache, sorted by issue_number, updated from DB each tick.
+    let mut pipelines: Vec<Pipeline> = Vec::new();
+    let mut last_refresh: Option<Instant> = None;
 
-    // Clear once at startup so we begin with a clean slate.
-    // Ratatui's draw() uses double-buffer diffing after this point,
-    // so per-frame clears are unnecessary and cause flicker.
     terminal.clear()?;
 
-    // Draw initial frame
-    {
-        let state = state_rx.borrow().clone();
-        let (secs, text) = format_last_poll(state.last_poll);
-        cached_poll_secs = secs;
-        cached_poll_text = text;
-        draw_frame(terminal, &state, scroll_offset, tick, &cached_poll_text)?;
-    }
+    // Draw once before entering the event loop.
+    refresh_pipelines(db, &mut pipelines, &mut last_refresh);
+    let running_snap = running.lock().unwrap().clone();
+    draw_frame(
+        terminal,
+        &pipelines,
+        &running_snap,
+        repo,
+        poll_interval,
+        scroll_offset,
+        tick,
+        last_refresh,
+    )?;
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
-        let mut needs_redraw = false;
-
         tokio::select! {
-            result = state_rx.changed() => {
-                if result.is_ok() {
-                    needs_redraw = true;
-                    // Update cached poll text if seconds changed
-                    let state = state_rx.borrow();
-                    let (secs, text) = format_last_poll(state.last_poll);
-                    if cached_poll_secs != secs {
-                        cached_poll_secs = secs;
-                        cached_poll_text = text;
-                    }
-                }
+            _ = refresh_interval.tick() => {
+                tick = tick.wrapping_add(1);
+                refresh_pipelines(db, &mut pipelines, &mut last_refresh);
+                let running_snap = running.lock().unwrap().clone();
+                draw_frame(terminal, &pipelines, &running_snap, repo, poll_interval,
+                           scroll_offset, tick, last_refresh)?;
             }
             maybe_event = event_stream.next() => {
                 if let Some(Ok(event)) = maybe_event {
+                    let mut needs_redraw = false;
                     match event {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             match key.code {
@@ -170,8 +122,7 @@ async fn render_loop(
                                     needs_redraw = true;
                                 }
                                 KeyCode::Down | KeyCode::Char('j') => {
-                                    let max = state_rx.borrow()
-                                        .pipelines.len().saturating_sub(1);
+                                    let max = pipelines.len().saturating_sub(1);
                                     if scroll_offset < max {
                                         scroll_offset += 1;
                                     }
@@ -185,44 +136,47 @@ async fn render_loop(
                         }
                         _ => {}
                     }
+                    if needs_redraw {
+                        let running_snap = running.lock().unwrap().clone();
+                        draw_frame(terminal, &pipelines, &running_snap, repo, poll_interval,
+                                   scroll_offset, tick, last_refresh)?;
+                    }
                 }
             }
-            _ = spinner_interval.tick() => {
-                tick = tick.wrapping_add(1);
-                // Only redraw for spinner if there are active pipelines
-                let state = state_rx.borrow();
-                if has_active_pipelines(&state) {
-                    needs_redraw = true;
-                }
-                // Update poll text periodically
-                let (secs, text) = format_last_poll(state.last_poll);
-                if cached_poll_secs != secs {
-                    cached_poll_secs = secs;
-                    cached_poll_text = text;
-                    needs_redraw = true;
-                }
-            }
-        }
-
-        if needs_redraw {
-            let state = state_rx.borrow().clone();
-            draw_frame(terminal, &state, scroll_offset, tick, &cached_poll_text)?;
         }
     }
 
     Ok(())
 }
 
+/// Query the DB and update the local pipeline cache, sorted by issue_number.
+/// On DB error the cache is left unchanged so the last known state stays visible.
+fn refresh_pipelines(db: &Db, pipelines: &mut Vec<Pipeline>, last_refresh: &mut Option<Instant>) {
+    if let Ok(all) = db.get_all_active_pipelines() {
+        let mut list: Vec<Pipeline> = all.into_values().collect();
+        list.sort_by_key(|p| p.issue_number);
+        *pipelines = list;
+        *last_refresh = Some(Instant::now());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame drawing
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: &DaemonState,
+    pipelines: &[Pipeline],
+    running: &HashSet<u64>,
+    repo: &str,
+    poll_interval: u64,
     scroll_offset: usize,
     tick: usize,
-    last_poll_text: &str,
+    last_refresh: Option<Instant>,
 ) -> io::Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
-
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -232,9 +186,9 @@ fn draw_frame(
             ])
             .split(area);
 
-        render_header(frame, chunks[0], state);
-        render_pipeline_table(frame, chunks[1], state, scroll_offset, tick);
-        render_footer(frame, chunks[2], state, last_poll_text);
+        render_header(frame, chunks[0], repo, poll_interval);
+        render_pipeline_table(frame, chunks[1], pipelines, running, scroll_offset, tick);
+        render_footer(frame, chunks[2], pipelines, last_refresh);
     })?;
     Ok(())
 }
@@ -243,23 +197,20 @@ fn draw_frame(
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-fn render_header(frame: &mut ratatui::Frame, area: Rect, state: &DaemonState) {
-    let cycle_text = format!("cycle: {}", state.cycle_count);
-    let poll_text = format!("poll: {}s", state.poll_interval);
-
+fn render_header(frame: &mut ratatui::Frame, area: Rect, repo: &str, poll_interval: u64) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " 🐈‍⬛ FAMILIAR ",
+            " ⚒️  FAMILIAR ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "— Your Ghostly Companion  ",
+            "— Autonomous Software Factory  ",
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            format!("repo: {}  │  {}  │  {}", state.repo, poll_text, cycle_text),
+            format!("repo: {}  │  poll: {}s", repo, poll_interval),
             Style::default().fg(Color::Cyan),
         ),
     ]))
@@ -268,7 +219,6 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect, state: &DaemonState) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
-
     frame.render_widget(header, area);
 }
 
@@ -283,13 +233,14 @@ pub fn spinner_frame(tick: usize) -> &'static str {
 fn render_pipeline_table(
     frame: &mut ratatui::Frame,
     area: Rect,
-    state: &DaemonState,
+    pipelines: &[Pipeline],
+    running: &HashSet<u64>,
     scroll_offset: usize,
     tick: usize,
 ) {
-    if state.pipelines.is_empty() {
+    if pipelines.is_empty() {
         let empty = Paragraph::new(Line::from(vec![Span::styled(
-            "  No active pipelines — your familiar awaits a summoning...",
+            "  No active pipelines — waiting for labeled issues...",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
@@ -317,9 +268,11 @@ fn render_pipeline_table(
     });
     let header = Row::new(header_cells).height(1);
 
-    let visible_pipelines: Vec<_> = state.pipelines.iter().skip(scroll_offset).collect();
+    let visible: Vec<_> = pipelines.iter().skip(scroll_offset).collect();
 
-    let rows = visible_pipelines.iter().map(|p| {
+    let rows = visible.iter().map(|p| {
+        let is_running = running.contains(&p.issue_number);
+        let status_text = stage_status_text(&p.stage, is_running);
         let (stage_name, stage_color) = stage_display(&p.stage);
         let (ordinal, total) = (p.stage.ordinal(), Stage::total_stages());
         let progress_bar = build_progress_bar(ordinal, total);
@@ -354,11 +307,10 @@ fn render_pipeline_table(
             Cell::from(activity_indicator).style(Style::default().fg(activity_color)),
             Cell::from(stage_name).style(Style::default().fg(stage_color)),
             Cell::from(progress_bar),
-            Cell::from(p.status_text.clone()).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(status_text).style(Style::default().fg(Color::DarkGray)),
             Cell::from(p.branch_name.clone()).style(Style::default().fg(Color::Blue)),
             Cell::from(pr_text).style(Style::default().fg(Color::Magenta)),
         ])
-        .bottom_margin(1)
     });
 
     let table = Table::new(
@@ -389,14 +341,25 @@ fn render_pipeline_table(
 fn render_footer(
     frame: &mut ratatui::Frame,
     area: Rect,
-    state: &DaemonState,
-    last_poll_text: &str,
+    pipelines: &[Pipeline],
+    last_refresh: Option<Instant>,
 ) {
-    let active_count = state
-        .pipelines
+    let active_count = pipelines
         .iter()
         .filter(|p| !matches!(p.stage, Stage::Done | Stage::Failed(_)))
         .count();
+
+    let refresh_text = match last_refresh {
+        Some(t) => {
+            let secs = t.elapsed().as_secs();
+            if secs == 0 {
+                "data: live".to_string()
+            } else {
+                format!("data: {}s old", secs)
+            }
+        }
+        None => "data: —".to_string(),
+    };
 
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -406,7 +369,7 @@ fn render_footer(
                 .add_modifier(Modifier::DIM),
         ),
         Span::styled(
-            format!("│  {}  ", last_poll_text),
+            format!("│  {}  ", refresh_text),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
@@ -414,7 +377,7 @@ fn render_footer(
             Style::default().fg(Color::Green),
         ),
         Span::styled(
-            format!("│  total: {}", state.pipelines.len()),
+            format!("│  total: {}", pipelines.len()),
             Style::default().fg(Color::DarkGray),
         ),
     ]))
@@ -450,6 +413,28 @@ fn stage_display(stage: &Stage) -> (String, Color) {
     }
 }
 
+/// Returns a brief status string for the given stage and running state.
+fn stage_status_text(stage: &Stage, is_running: bool) -> String {
+    if is_running && stage.needs_agent() {
+        return "agent running…".into();
+    }
+    match stage {
+        Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix => {
+            if is_running {
+                "agent running…".into()
+            } else {
+                "waiting for slot…".into()
+            }
+        }
+        Stage::Ingest => "fetching issue…".into(),
+        Stage::Understand => "analyzing…".into(),
+        Stage::Submit => "pushing PR…".into(),
+        Stage::Watch => "watching CI…".into(),
+        Stage::Done => "complete".into(),
+        Stage::Failed(_) => "failed".into(),
+    }
+}
+
 /// Build an ASCII progress bar like `████░░░░ 3/8`.
 fn build_progress_bar(current: u8, total: u8) -> String {
     let filled = current as usize;
@@ -461,10 +446,26 @@ fn build_progress_bar(current: u8, total: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn make_pipeline(issue_number: u64, stage: Stage) -> Pipeline {
+        Pipeline {
+            issue_number,
+            repo: "owner/repo".into(),
+            stage,
+            run_dir: PathBuf::from("/tmp"),
+            worktree: PathBuf::from("/tmp/worktree"),
+            bare_repo: PathBuf::from("/tmp/repo.git"),
+            pr_number: None,
+            blocker_fingerprint: None,
+            branch_name: format!("branch-{}", issue_number),
+            issue_title: format!("Issue {}", issue_number),
+            verify_attempts: 0,
+        }
+    }
 
     #[test]
     fn spinner_frame_cycles_through_all_frames() {
-        // Each tick should produce the corresponding frame
         for (i, expected) in SPINNER_FRAMES.iter().enumerate() {
             assert_eq!(spinner_frame(i), *expected);
         }
@@ -480,7 +481,6 @@ mod tests {
 
     #[test]
     fn spinner_frame_handles_large_tick() {
-        // Should not panic on very large tick values
         let frame = spinner_frame(usize::MAX);
         assert!(SPINNER_FRAMES.contains(&frame));
     }
@@ -524,64 +524,41 @@ mod tests {
     }
 
     #[test]
-    fn cached_poll_text_format_none() {
-        let (secs, text) = format_last_poll(None);
-        assert_eq!(secs, None);
-        assert_eq!(text, "last poll: —");
+    fn no_active_pipelines_when_empty() {
+        let pipelines: Vec<Pipeline> = Vec::new();
+        assert!(!pipelines
+            .iter()
+            .any(|p| !matches!(p.stage, Stage::Done | Stage::Failed(_))));
     }
 
     #[test]
-    fn cached_poll_text_format_some() {
-        let past = chrono::Utc::now() - chrono::Duration::seconds(5);
-        let (secs, text) = format_last_poll(Some(past));
-        // Should be approximately 5 seconds (allow for test execution time)
-        assert!(secs.unwrap() >= 4 && secs.unwrap() <= 6);
-        assert!(text.starts_with("last poll: "));
-        assert!(text.ends_with("s ago"));
+    fn no_active_pipelines_when_all_terminal() {
+        let pipelines = vec![
+            make_pipeline(1, Stage::Done),
+            make_pipeline(2, Stage::Failed("err".into())),
+        ];
+        assert!(!pipelines
+            .iter()
+            .any(|p| !matches!(p.stage, Stage::Done | Stage::Failed(_))));
     }
 
     #[test]
-    fn no_redraw_when_no_active_pipelines() {
-        let empty_state = DaemonState::default();
-        assert!(!has_active_pipelines(&empty_state));
-
-        let done_state = DaemonState {
-            pipelines: vec![
-                PipelineSnapshot {
-                    issue_number: 1,
-                    issue_title: "test".into(),
-                    stage: Stage::Done,
-                    branch_name: "b".into(),
-                    pr_number: None,
-                    status_text: "done".into(),
-                },
-                PipelineSnapshot {
-                    issue_number: 2,
-                    issue_title: "test2".into(),
-                    stage: Stage::Failed("err".into()),
-                    branch_name: "b2".into(),
-                    pr_number: None,
-                    status_text: "failed".into(),
-                },
-            ],
-            ..Default::default()
-        };
-        assert!(!has_active_pipelines(&done_state));
+    fn active_pipeline_detected() {
+        let pipelines = vec![make_pipeline(1, Stage::Implement)];
+        assert!(pipelines
+            .iter()
+            .any(|p| !matches!(p.stage, Stage::Done | Stage::Failed(_))));
     }
 
     #[test]
-    fn redraw_when_active_pipelines_exist() {
-        let active_state = DaemonState {
-            pipelines: vec![PipelineSnapshot {
-                issue_number: 1,
-                issue_title: "test".into(),
-                stage: Stage::Implement,
-                branch_name: "b".into(),
-                pr_number: None,
-                status_text: "running".into(),
-            }],
-            ..Default::default()
-        };
-        assert!(has_active_pipelines(&active_state));
+    fn pipelines_sorted_by_issue_number() {
+        let mut pipelines = vec![
+            make_pipeline(3, Stage::Plan),
+            make_pipeline(1, Stage::Implement),
+            make_pipeline(2, Stage::Watch),
+        ];
+        pipelines.sort_by_key(|p| p.issue_number);
+        let numbers: Vec<u64> = pipelines.iter().map(|p| p.issue_number).collect();
+        assert_eq!(numbers, vec![1, 2, 3]);
     }
 }
