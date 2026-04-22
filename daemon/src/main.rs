@@ -20,9 +20,9 @@ use tui::{DaemonState, PipelineSnapshot};
 // CLI
 // ---------------------------------------------------------------------------
 
-/// Guild — an autonomous software factory.
+/// Familiar — an autonomous software factory.
 #[derive(Parser, Debug)]
-#[command(name = "guild", version, about)]
+#[command(name = "familiar", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Start the guild daemon with a live interactive dashboard.
+    /// Start the familiar daemon with a live interactive dashboard.
     Start {
         /// GitHub repo in owner/repo format (positional or --repo)
         #[arg(value_name = "REPO")]
@@ -41,7 +41,7 @@ enum Commands {
         repo_flag: Option<String>,
 
         /// Issue label to filter on
-        #[arg(short, long, default_value = "guild")]
+        #[arg(short, long, default_value = "familiar")]
         label: String,
 
         /// Seconds between polling cycles
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
         } => {
             let repo = repo
                 .or(repo_flag)
-                .expect("repo is required: guild start <owner/repo>");
+                .expect("repo is required: familiar start <owner/repo>");
 
             let agent_cmd = agent_cmd.unwrap_or_else(|| backend.default_cmd().to_string());
             let model = model.unwrap_or_else(|| backend.default_model().to_string());
@@ -156,14 +156,14 @@ async fn main() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// `guild status` — one-shot status display
+// `familiar status` — one-shot status display
 // ---------------------------------------------------------------------------
 
 fn run_status(runs_dir: &str) -> Result<()> {
-    let db_path = PathBuf::from(runs_dir).join("guild.db");
+    let db_path = PathBuf::from(runs_dir).join("familiar.db");
     if !db_path.exists() {
-        println!("No guild database found at {}", db_path.display());
-        println!("Start the daemon first with: guild start <owner/repo>");
+        println!("No familiar database found at {}", db_path.display());
+        println!("Start the daemon first with: familiar start <owner/repo>");
         return Ok(());
     }
 
@@ -196,7 +196,7 @@ fn run_status(runs_dir: &str) -> Result<()> {
     Ok(())
 }
 // ---------------------------------------------------------------------------
-// `guild start` — main daemon with TUI
+// `familiar start` — main daemon with TUI
 // ---------------------------------------------------------------------------
 
 /// Generate a brief status description for the TUI based on the pipeline
@@ -258,11 +258,11 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("guild=info")),
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("familiar=info")),
             )
             .init();
     } else {
-        let log_path = config.runs_dir.join("guild.log");
+        let log_path = config.runs_dir.join("familiar.log");
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -272,7 +272,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("guild=info")),
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("familiar=info")),
             )
             .with_writer(std::sync::Mutex::new(log_file))
             .with_ansi(false)
@@ -287,7 +287,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     }
 
     info!("=======================================================");
-    info!("  Guild daemon starting");
+    info!("  Familiar daemon starting");
     info!("  repo           : {}", config.repo);
     info!("  label          : {}", config.label);
     info!("  poll_interval  : {}s", config.poll_interval);
@@ -300,7 +300,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     info!("=======================================================");
 
     // --- open database -----------------------------------------------------
-    let db = db::Db::open(&config.runs_dir.join("guild.db"))?;
+    let db = db::Db::open(&config.runs_dir.join("familiar.db"))?;
 
     // --- migrate legacy state.json if present ------------------------------
     db.migrate_from_state_json(&config.runs_dir)?;
@@ -709,7 +709,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval)).await;
     }
 
-    info!("guild daemon shut down cleanly");
+    info!("familiar daemon shut down cleanly");
     Ok(())
 }
 fn cleanup_orphan_run_dirs(runs_dir: &std::path::Path, db: &db::Db) {

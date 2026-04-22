@@ -13,7 +13,7 @@ The factory runs in stages:
 
 2. UNDERSTAND — read the target repo. Check .github/workflows/ for CI
    and PR comment triggers. Read a sample source + test file. Read
-   CONTRIBUTING.md or AGENTS.md. Read .guild/learnings.md if it exists —
+   CONTRIBUTING.md or AGENTS.md. Read .familiar/learnings.md if it exists —
    this file contains repo-specific learnings that MUST be followed in
    all subsequent stages.
 
@@ -35,7 +35,7 @@ The factory runs in stages:
 8. FIX — collect ALL relevant data (comments, CI logs, diff) and hand
    it to the agent. The agent decides the fix. Not the glue.
 
-9. LEARN — append anything non-obvious to a per-repo learnings.md /.guild config folder.
+9. LEARN — append anything non-obvious to a per-repo learnings.md /.familiar config folder.
 
 Repo setup (execute once per issue, before IMPLEMENT):
 

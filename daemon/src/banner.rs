@@ -1,39 +1,39 @@
-//! ASCII art banner for the Guild daemon startup screen.
+//! ASCII art banner for the Familiar daemon startup screen.
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::ExecutableCommand;
 use std::io::stdout;
 
 const BANNER: &str = r#"
-                        /\       /\
-                       /  \_/\__/  \
-                      / \  _/\_  / \
-                     /   \/    \/   \
-                    / /|  GUILD  |\ \
-                   / / |  HALL   | \ \
-                  / /  |_.____.__|  \ \
-                 /_/  /||  ||  ||\  \_\
-                |  | / ||  ||  || \ |  |
-                |🗡️| | |+--++--+| | |⚔️ |
-                |  | | ||/\||/\|| | |  |
-                |  |_| ||''||''|| |_|  |
-                |  |   |+--++--+|   |  |
-                | .|   ||  ()  ||   |. |
-                |/ |   ||      ||   | \|
-               /|  |   |+------+|   |  |\
-              /_|__|___|________|___|__|_\
-             |  ~~  {come in, we're open}  |
-             |_____________________________|
+                      /\       /\
+                     /  \_/\__/  \
+                    / \  _/\_  / \
+                   /   \/    \/   \
+                  / /|          |\ \
+                 / / | FAMILIAR | \ \
+                / /  |  HOUSE   |  \ \
+               /_/  /||  ||  ||\   \_\
+              |  | / ||  ||  || \ |  |
+              |🔮| | |+--++--+| | |📖|
+              |  | | ||/\||/\|| | |  |
+              |  |_| ||''||''|| |_|  |
+              |  |   |+--++--+|   |  |
+              | .|   ||  ()  ||   |. |
+              |/ |   ||      ||   | \|
+             /|  |   |+------+|   |  |\
+            /_|__|___|________|___|__|_\
+           |  ~~  {come in, we're open}  |
+           |_____________________________|
 "#;
 
 const TAGLINE: &str = r#"
     ┌─────────────────────────────────────────────────────────────────┐
-    │  "From issue to pull request, the guild works through the      │
+    │  "From issue to pull request, your familiar works through the  │
     │   night so you don't have to."                                 │
     └─────────────────────────────────────────────────────────────────┘
 "#;
 
-/// Print the guild banner with colors to stdout.
+/// Print the familiar banner with colors to stdout.
 pub fn print_banner() {
     let mut out = stdout();
 

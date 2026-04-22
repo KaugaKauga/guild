@@ -1,4 +1,4 @@
-//! SQLite-backed persistent state for guild pipelines.
+//! SQLite-backed persistent state for familiar pipelines.
 //!
 //! Two tables:
 //!
@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::pipeline::{Pipeline, Stage};
 
-/// Thread-safe, cloneable handle to the guild state database.
+/// Thread-safe, cloneable handle to the familiar state database.
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,

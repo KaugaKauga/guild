@@ -270,11 +270,11 @@ pub async fn add_worktree(bare_repo: &Path, worktree_dest: &Path, branch: &str) 
 
     // Configure user identity in the worktree so commits work.
     let _ = run_git(
-        &["config", "user.email", "guild@users.noreply.github.com"],
+        &["config", "user.email", "familiar@users.noreply.github.com"],
         worktree_dest,
     )
     .await;
-    let _ = run_git(&["config", "user.name", "Guild"], worktree_dest).await;
+    let _ = run_git(&["config", "user.name", "Familiar"], worktree_dest).await;
 
     Ok(())
 }
@@ -358,7 +358,7 @@ pub async fn commit_all(worktree: &Path, message: &str) -> Result<()> {
 /// Push `branch` to origin, setting upstream tracking.
 ///
 /// Tries `--force-with-lease` first (safe default). Falls back to `--force`
-/// if tracking info is stale. Safe because guild owns these branches exclusively.
+/// if tracking info is stale. Safe because familiar owns these branches exclusively.
 pub async fn push_branch(worktree: &Path, branch: &str) -> Result<()> {
     // Refresh remote tracking info so --force-with-lease has accurate state.
     let _ = run_git(&["fetch", "origin", branch], worktree).await;
@@ -428,7 +428,7 @@ pub async fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<u64>>
 
 /// Delete a remote branch (best-effort).
 ///
-/// Used to clean up `guild/issue-*` branches after a PR is merged.
+/// Used to clean up `familiar/issue-*` branches after a PR is merged.
 /// Errors are logged but not propagated -- the branch may already have been
 /// deleted by GitHub's auto-delete-on-merge setting.
 pub async fn delete_remote_branch(repo: &str, branch: &str) {

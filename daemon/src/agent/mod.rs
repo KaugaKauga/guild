@@ -1,6 +1,6 @@
 //! Agent CLI integration.
 //!
-//! Guild dispatches intelligent stages (plan, implement, verify, fix) to an
+//! Familiar dispatches intelligent stages (plan, implement, verify, fix) to an
 //! external CLI agent.  Two backends are currently supported:
 //!
 //! - [`Backend::Copilot`] — GitHub Copilot CLI (`copilot`)
