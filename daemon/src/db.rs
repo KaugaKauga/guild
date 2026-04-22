@@ -65,12 +65,7 @@ impl Db {
             "issue_title",
             "TEXT NOT NULL DEFAULT ''",
         )?;
-        Self::migrate_add_column(
-            &conn,
-            "pipelines",
-            "bare_repo",
-            "TEXT NOT NULL DEFAULT ''",
-        )?;
+        Self::migrate_add_column(&conn, "pipelines", "bare_repo", "TEXT NOT NULL DEFAULT ''")?;
         Self::migrate_add_column(
             &conn,
             "pipelines",

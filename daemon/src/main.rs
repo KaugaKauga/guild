@@ -229,10 +229,16 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     // Canonicalize to absolute paths so that relative paths resolve correctly
     // when git commands run with a different current_dir (e.g. bare repo).
     config.runs_dir = config.runs_dir.canonicalize().with_context(|| {
-        format!("failed to canonicalize runs_dir: {}", config.runs_dir.display())
+        format!(
+            "failed to canonicalize runs_dir: {}",
+            config.runs_dir.display()
+        )
     })?;
     config.repos_dir = config.repos_dir.canonicalize().with_context(|| {
-        format!("failed to canonicalize repos_dir: {}", config.repos_dir.display())
+        format!(
+            "failed to canonicalize repos_dir: {}",
+            config.repos_dir.display()
+        )
     })?;
 
     // --- tracing -----------------------------------------------------------
@@ -403,7 +409,12 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
                 issue = issue.number,
                 "new issue detected, creating pipeline"
             );
-            let p = pipeline::Pipeline::new(issue.number, config.repo.clone(), &config.runs_dir, &config.repos_dir);
+            let p = pipeline::Pipeline::new(
+                issue.number,
+                config.repo.clone(),
+                &config.runs_dir,
+                &config.repos_dir,
+            );
             if let Err(e) = db.upsert_pipeline(&p) {
                 error!(
                     issue = issue.number,
