@@ -43,7 +43,7 @@ enum Commands {
         label: String,
 
         /// Seconds between polling cycles
-        #[arg(short, long, default_value_t = 30)]
+        #[arg(short, long, default_value_t = 10)]
         poll_interval: u64,
 
         /// Which agent CLI to drive: `copilot` or `claude`.
@@ -320,8 +320,14 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
         let poll_interval = config.poll_interval;
         let shutdown_tui = Arc::clone(&shutdown);
         tokio::spawn(async move {
-            if let Err(e) =
-                tui::run_tui(db_for_tui, running_for_tui, repo, poll_interval, shutdown_tui).await
+            if let Err(e) = tui::run_tui(
+                db_for_tui,
+                running_for_tui,
+                repo,
+                poll_interval,
+                shutdown_tui,
+            )
+            .await
             {
                 eprintln!("TUI error: {}", e);
             }

@@ -48,8 +48,15 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result =
-        render_loop(&mut terminal, &db, &running, &repo, poll_interval, &shutdown).await;
+    let result = render_loop(
+        &mut terminal,
+        &db,
+        &running,
+        &repo,
+        poll_interval,
+        &shutdown,
+    )
+    .await;
 
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
