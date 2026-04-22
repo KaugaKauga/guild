@@ -259,32 +259,50 @@ mod tests {
     #[test]
     fn copilot_default_planning_model_is_opus() {
         let model = Backend::Copilot.default_planning_model();
-        assert!(model.contains("opus"), "planning model should be opus, got: {model}");
+        assert!(
+            model.contains("opus"),
+            "planning model should be opus, got: {model}"
+        );
     }
 
     #[test]
     fn copilot_default_coding_model_is_sonnet() {
         let model = Backend::Copilot.default_coding_model();
-        assert!(model.contains("sonnet"), "coding model should be sonnet, got: {model}");
+        assert!(
+            model.contains("sonnet"),
+            "coding model should be sonnet, got: {model}"
+        );
     }
 
     #[test]
     fn claude_default_planning_model_is_opus() {
         let model = Backend::Claude.default_planning_model();
-        assert!(model.contains("opus"), "planning model should be opus, got: {model}");
+        assert!(
+            model.contains("opus"),
+            "planning model should be opus, got: {model}"
+        );
     }
 
     #[test]
     fn claude_default_coding_model_is_sonnet() {
         let model = Backend::Claude.default_coding_model();
-        assert!(model.contains("sonnet"), "coding model should be sonnet, got: {model}");
+        assert!(
+            model.contains("sonnet"),
+            "coding model should be sonnet, got: {model}"
+        );
     }
 
     #[test]
     fn default_model_matches_planning_model() {
         // default_model() is a legacy alias for the planning model
-        assert_eq!(Backend::Copilot.default_model(), Backend::Copilot.default_planning_model());
-        assert_eq!(Backend::Claude.default_model(), Backend::Claude.default_planning_model());
+        assert_eq!(
+            Backend::Copilot.default_model(),
+            Backend::Copilot.default_planning_model()
+        );
+        assert_eq!(
+            Backend::Claude.default_model(),
+            Backend::Claude.default_planning_model()
+        );
     }
 
     #[test]
