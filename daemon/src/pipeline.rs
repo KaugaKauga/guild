@@ -119,6 +119,8 @@ pub struct Pipeline {
     pub blocker_fingerprint: Option<String>,
     pub branch_name: String,
     pub issue_title: String,
+    #[serde(default)]
+    pub verify_attempts: u8,
 }
 
 impl Pipeline {
@@ -150,6 +152,7 @@ impl Pipeline {
             blocker_fingerprint: None,
             branch_name,
             issue_title: String::new(),
+            verify_attempts: 0,
         }
     }
 
@@ -463,7 +466,10 @@ impl Pipeline {
     }
 
     pub async fn do_verify(&mut self, config: &Config) -> Result<bool> {
-        let verify_report = self.run_dir.join("verify_report.md").display().to_string();
+        self.verify_attempts += 1;
+
+        let verify_report_path = self.run_dir.join("verify_report.md");
+        let verify_report = verify_report_path.display().to_string();
 
         let prompt = load_agent_prompt(
             &config.agents_dir,
@@ -486,7 +492,30 @@ impl Pipeline {
         .await
         .context("Verify: agent run failed")?;
 
-        self.stage = Stage::Submit;
+        // Parse the verify report for a PASS/FAIL verdict.
+        let verdict = parse_verify_verdict(&verify_report_path);
+
+        if verdict == VerifyVerdict::Pass {
+            info!("Verify: PASS (attempt {})", self.verify_attempts);
+            self.stage = Stage::Submit;
+        } else if self.verify_attempts >= 2 {
+            info!(
+                "Verify: FAIL after {} attempts, proceeding to Submit anyway",
+                self.verify_attempts
+            );
+            self.stage = Stage::Submit;
+        } else {
+            info!(
+                "Verify: FAIL (attempt {}), looping back to Fix",
+                self.verify_attempts
+            );
+            // Copy verify report as blocker report so the fix agent can read it.
+            let report_content = read_file_or(&verify_report_path, "(no verify report)");
+            fs::write(self.run_dir.join("blocker_report.md"), &report_content)
+                .context("Verify: failed to write blocker_report.md")?;
+            self.stage = Stage::Fix;
+        }
+
         Ok(true)
     }
 
@@ -790,6 +819,15 @@ impl Pipeline {
         .await
         .context("Fix: agent run failed")?;
 
+        // If no PR exists yet, this is a pre-submit verify→fix loop.
+        // Go back to Verify without committing/pushing (Submit handles that).
+        if self.pr_number.is_none() {
+            info!("Fix: pre-submit fix complete, returning to Verify");
+            self.stage = Stage::Verify;
+            return Ok(true);
+        }
+
+        // Post-submit fix: commit, push, and return to Watch.
         github::commit_all(&self.worktree, "guild: fix blockers")
             .await
             .context("Fix: failed to commit")?;
@@ -801,6 +839,60 @@ impl Pipeline {
         self.stage = Stage::Watch;
         Ok(true)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Verify verdict parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq)]
+pub enum VerifyVerdict {
+    Pass,
+    Fail,
+}
+
+/// Parse the verify report file and extract the PASS/FAIL verdict.
+///
+/// Looks for a `## Verdict` section and then a line containing exactly
+/// `PASS` or `FAIL`. Returns `Fail` if the file is missing, unparseable,
+/// or doesn't contain a clear verdict.
+pub fn parse_verify_verdict(report_path: &Path) -> VerifyVerdict {
+    let content = match fs::read_to_string(report_path) {
+        Ok(c) => c,
+        Err(_) => return VerifyVerdict::Fail,
+    };
+
+    parse_verify_verdict_from_str(&content)
+}
+
+/// Parse the PASS/FAIL verdict from the content of a verify report string.
+fn parse_verify_verdict_from_str(content: &str) -> VerifyVerdict {
+    let mut in_verdict_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("## Verdict") {
+            in_verdict_section = true;
+            continue;
+        }
+
+        // A new section header ends the verdict section.
+        if in_verdict_section && trimmed.starts_with("## ") {
+            break;
+        }
+
+        if in_verdict_section && trimmed == "PASS" {
+            return VerifyVerdict::Pass;
+        }
+
+        if in_verdict_section && trimmed == "FAIL" {
+            return VerifyVerdict::Fail;
+        }
+    }
+
+    // No clear verdict found — treat as failure.
+    VerifyVerdict::Fail
 }
 
 // ---------------------------------------------------------------------------
@@ -958,6 +1050,52 @@ mod tests {
 
         let result = load_agent_prompt(&dir, "repeat", &[("x", "val")]).unwrap();
         assert_eq!(result, "val and val again");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_verify_verdict_pass() {
+        let content = "## Verdict\nPASS\n\n## Build\nOK\n";
+        assert_eq!(parse_verify_verdict_from_str(content), VerifyVerdict::Pass);
+    }
+
+    #[test]
+    fn test_parse_verify_verdict_fail() {
+        let content = "## Verdict\nFAIL\n\n## Build\nFAILED\n## Issues\ncargo build failed\n";
+        assert_eq!(parse_verify_verdict_from_str(content), VerifyVerdict::Fail);
+    }
+
+    #[test]
+    fn test_parse_verify_verdict_missing_section() {
+        let content = "## Build\nOK\n## Tests\nOK\n";
+        assert_eq!(parse_verify_verdict_from_str(content), VerifyVerdict::Fail);
+    }
+
+    #[test]
+    fn test_parse_verify_verdict_empty() {
+        assert_eq!(parse_verify_verdict_from_str(""), VerifyVerdict::Fail);
+    }
+
+    #[test]
+    fn test_parse_verify_verdict_whitespace() {
+        let content = "## Verdict\n  PASS  \n\n## Build\n";
+        assert_eq!(parse_verify_verdict_from_str(content), VerifyVerdict::Pass);
+    }
+
+    #[test]
+    fn test_parse_verify_verdict_from_file() {
+        let dir = std::env::temp_dir().join("guild_test_verify_verdict");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("verify_report.md");
+        fs::write(&path, "## Verdict\nPASS\n\n## Build\nOK\n").unwrap();
+        assert_eq!(parse_verify_verdict(&path), VerifyVerdict::Pass);
+
+        fs::write(&path, "## Verdict\nFAIL\n\n## Issues\nerror\n").unwrap();
+        assert_eq!(parse_verify_verdict(&path), VerifyVerdict::Fail);
+
+        let missing = dir.join("nonexistent.md");
+        assert_eq!(parse_verify_verdict(&missing), VerifyVerdict::Fail);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

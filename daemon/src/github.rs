@@ -294,8 +294,9 @@ pub async fn remove_worktree(bare_repo: &Path, worktree_dest: &Path) -> Result<(
             "git worktree remove failed, falling back to rm + prune"
         );
         if worktree_dest.exists() {
-            std::fs::remove_dir_all(worktree_dest)
-                .with_context(|| format!("failed to remove worktree at {}", worktree_dest.display()))?;
+            std::fs::remove_dir_all(worktree_dest).with_context(|| {
+                format!("failed to remove worktree at {}", worktree_dest.display())
+            })?;
         }
         let _ = run_git(&["worktree", "prune"], bare_repo).await;
     }
