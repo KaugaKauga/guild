@@ -1,13 +1,13 @@
-# Guild
+# Familiar
 
 An autonomous software factory. Point it at a GitHub repo, label an issue, and
-Guild will implement the change, open a draft PR, and keep fixing it until CI is
+Familiar will implement the change, open a draft PR, and keep fixing it until CI is
 green — with no human in the loop.
 
 ## What it does
 
-Guild is a Rust daemon that continuously monitors a GitHub repository for issues
-carrying a specific label (default: `guild`). When it finds one, it drives the
+Familiar is a Rust daemon that continuously monitors a GitHub repository for issues
+carrying a specific label (default: `familiar`). When it finds one, it drives the
 issue through a fully automated pipeline that ends with a reviewed, green pull
 request.
 
@@ -35,26 +35,26 @@ INGEST ─▶ UNDERSTAND ─▶ PLAN ─▶ IMPLEMENT ─▶ VERIFY ─▶ SUBMI
 | Stage | Who runs it | What happens |
 |-------|-------------|--------------|
 | **INGEST** | Daemon | Fetches the issue body, metadata, comments, and linked issues via `gh`. Saves everything as JSON + markdown into the run directory. |
-| **UNDERSTAND** | Daemon | Ensures a shared bare clone of the repo exists (or fetches updates). Creates a git worktree with the working branch (`guild/issue-{N}`). Scans for CI workflows, contributing docs, dependency manifests. Reads `.guild/learnings.md` for repo-specific agent knowledge. Builds a directory tree. |
+| **UNDERSTAND** | Daemon | Ensures a shared bare clone of the repo exists (or fetches updates). Creates a git worktree with the working branch (`familiar/issue-{N}`). Scans for CI workflows, contributing docs, dependency manifests. Reads `.familiar/learnings.md` for repo-specific agent knowledge. Builds a directory tree. |
 | **PLAN** | Agent | Reads the issue + repo summary. Produces `plan.md` — which files to touch, what tests to write, what UI wiring is needed. |
-| **IMPLEMENT** | Agent | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. Appends any repo-specific learnings to `.guild/learnings.md`. |
+| **IMPLEMENT** | Agent | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. Appends any repo-specific learnings to `.familiar/learnings.md`. |
 | **VERIFY** | Agent | Runs linting and basic checks. Fixes lint errors. Does **not** run full test suites that might hang (watch mode, browser tests). Trusts CI for that. |
 | **SUBMIT** | Daemon | Commits all changes, pushes the branch, opens a **draft** pull request. Never marks it ready. |
-| **WATCH** | Daemon | Polls the PR every cycle. Computes a "blocker fingerprint" from: failed CI checks, review decision, mergeable state, and `@guild` comment mentions. When the fingerprint changes, enters FIX. |
-| **FIX** | Agent | Reads the blocker report (failed checks, review comments, `@guild` mentions). Fixes the code. Appends any learnings to `.guild/learnings.md`. Daemon commits and pushes. Returns to WATCH. |
-| **DONE** | Daemon | All checks green, review approved (or none), no `@guild` comments pending. Pipeline complete. |
+| **WATCH** | Daemon | Polls the PR every cycle. Computes a "blocker fingerprint" from: failed CI checks, review decision, mergeable state, and `@familiar` comment mentions. When the fingerprint changes, enters FIX. |
+| **FIX** | Agent | Reads the blocker report (failed checks, review comments, `@familiar` mentions). Fixes the code. Appends any learnings to `.familiar/learnings.md`. Daemon commits and pushes. Returns to WATCH. |
+| **DONE** | Daemon | All checks green, review approved (or none), no `@familiar` comments pending. Pipeline complete. |
 
 ### The WATCH ↔ FIX loop
 
-After the PR is submitted, Guild enters a monitoring loop:
+After the PR is submitted, Familiar enters a monitoring loop:
 
 1. **WATCH** polls the PR status every 30 seconds (configurable)
 2. It reacts to three types of signals:
    - **CI failures** — always triggers FIX
    - **Formal review with "changes requested"** — always triggers FIX, includes the reviewer's comments
-   - **PR comments containing `@guild`** — triggers FIX (this is how you give it instructions)
-3. Regular PR comments **without** `@guild` are ignored — not every conversation needs the agent
-4. When all checks are green, review is approved (or none required), and there are no pending `@guild` mentions, the pipeline marks itself **DONE**
+   - **PR comments containing `@familiar`** — triggers FIX (this is how you give it instructions)
+3. Regular PR comments **without** `@familiar` are ignored — not every conversation needs the agent
+4. When all checks are green, review is approved (or none required), and there are no pending `@familiar` mentions, the pipeline marks itself **DONE**
 
 ## How to use it
 
@@ -69,21 +69,21 @@ After the PR is submitted, Guild enters a monitoring loop:
 ### Build
 
 ```
-cd guild/daemon
+cd familiar/daemon
 cargo build --release
 ```
 
 ### Start the daemon
 
 ```
-guild start owner/repo
+familiar start owner/repo
 ```
 
 Or with non-default options:
 
 ```
-guild start owner/repo \
-  --label guild \
+familiar start owner/repo \
+  --label familiar \
   --poll-interval 30 \
   --backend claude \
   --model claude-opus-4-7 \
@@ -101,26 +101,26 @@ cargo run -- start owner/repo
 That's it. The daemon starts polling. To process an issue:
 
 1. Create an issue on the target repo
-2. Add the `guild` label to it
+2. Add the `familiar` label to it
 3. The daemon picks it up within 30 seconds and starts the pipeline
 
 ### Talk to it on a PR
 
-Once Guild opens a draft PR, you can direct it with comments:
+Once Familiar opens a draft PR, you can direct it with comments:
 
 ```
-@guild the error handling in db.rs needs to use Result instead of unwrap
+@familiar the error handling in db.rs needs to use Result instead of unwrap
 ```
 
-Any comment containing `@guild` will be picked up on the next poll cycle.
-Comments without `@guild` are left alone.
+Any comment containing `@familiar` will be picked up on the next poll cycle.
+Comments without `@familiar` are left alone.
 
 ### CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repo` / `-r` | *required* | GitHub repo to watch (`owner/repo`) |
-| `--label` / `-l` | `guild` | Only issues with this label get picked up |
+| `--label` / `-l` | `familiar` | Only issues with this label get picked up |
 | `--poll-interval` / `-p` | `30` | Seconds between polling cycles |
 | `--backend` | `copilot` | Agent CLI backend: `copilot` or `claude` |
 | `--agent-cmd` | backend default | Path or name of the agent CLI binary (alias: `--copilot-cmd`) |
@@ -131,11 +131,11 @@ Comments without `@guild` are left alone.
 ## Architecture
 
 ```
-guild/
+familiar/
   daemon/                     # Rust binary — the orchestrator
     src/
       main.rs                 # CLI parsing, main poll loop
-      db.rs                   # SQLite state persistence (guild.db)
+      db.rs                   # SQLite state persistence (familiar.db)
       github.rs               # All gh/git CLI wrappers
       pipeline.rs             # Per-issue state machine (the 9 stages)
       agent/                  # Agent CLI dispatch
@@ -151,7 +151,7 @@ guild/
   repos/                      # Shared bare clones (one per repo, gitignored)
     owner-repo.git/           # Bare clone — shared object store
   runs/                       # Per-run artifacts (gitignored)
-    guild.db                  # SQLite database (pipelines + completed ledger)
+    familiar.db               # SQLite database (pipelines + completed ledger)
     {timestamp}-{repo}-{issue}/
       issue.json              # Raw issue metadata
       issue_body.md           # Issue description
@@ -167,7 +167,7 @@ guild/
 
 ### State persistence
 
-Pipeline state lives in a SQLite database (`runs/guild.db`) with two tables:
+Pipeline state lives in a SQLite database (`runs/familiar.db`) with two tables:
 
 - **`pipelines`** -- one row per active pipeline, updated after every stage transition
 - **`completed`** -- permanent ledger of issues that reached Done (prevents re-runs)
@@ -214,16 +214,16 @@ to fix a test, how to address a review comment — lives in the agent process.
 
 ### Repo learnings
 
-Guild maintains a lightweight feedback loop via `.guild/learnings.md` in the target
+Familiar maintains a lightweight feedback loop via `.familiar/learnings.md` in the target
 repository. During the **UNDERSTAND** stage, the daemon reads this file (if it exists)
 and injects its contents into every agent prompt (PLAN, IMPLEMENT, FIX). This gives
 agents repo-specific context — build quirks, naming conventions, test patterns, common
 gotchas — without requiring human curation.
 
 At the end of **IMPLEMENT** and **FIX**, agents are instructed to reflect on anything
-non-obvious they discovered and append it to `.guild/learnings.md`. The file is
+non-obvious they discovered and append it to `.familiar/learnings.md`. The file is
 committed alongside the rest of the code changes, so learnings accumulate over time
-and are available to future Guild runs on the same repo.
+and are available to future Familiar runs on the same repo.
 
 ## Design principles
 
@@ -231,4 +231,4 @@ and are available to future Guild runs on the same repo.
 2. **Never mark a PR ready.** The daemon creates draft PRs only. A human decides when to merge.
 3. **Never silence a failing check.** If the agent can't fix it, the pipeline retries. If it's truly stuck, the daemon keeps polling until a human intervenes.
 4. **State survives restarts.** Kill the daemon at any point, restart it, and it picks up where it left off.
-5. **`@guild` is the control surface.** Comment on the PR to direct the agent. Everything else is ignored.
+5. **`@familiar` is the control surface.** Comment on the PR to direct the agent. Everything else is ignored.

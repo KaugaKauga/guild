@@ -1,4 +1,4 @@
-//! Terminal UI dashboard for the Guild daemon.
+//! Terminal UI dashboard for the Familiar daemon.
 //!
 //! Renders a live table of active pipelines showing issue number, stage,
 //! progress bar, and branch name.  Driven by a `tokio::sync::watch` channel
@@ -248,7 +248,7 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect, state: &DaemonState) {
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " ⚒️  GUILD ",
+            " ⚒️  FAMILIAR ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),

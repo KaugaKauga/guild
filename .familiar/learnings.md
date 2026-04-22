@@ -4,3 +4,5 @@
 - `db.rs` migrations use `PRAGMA table_info` to detect missing columns and `ALTER TABLE` to add them — new columns must have a `DEFAULT` clause to work with existing rows.
 - When adding a new field to `Pipeline`, you must update 5 places: the struct definition, `Pipeline::new()`, `get_all_active_pipelines()` SELECT, `upsert_pipeline()` INSERT, and `migrate_from_state_json()` INSERT.
 - The `do_fix()` method has two modes: pre-submit (no PR yet, returns to Verify) and post-submit (PR exists, commits/pushes and returns to Watch). The `pr_number` field determines which path is taken.
+- The tracing `EnvFilter` default in `main.rs` is keyed to the crate name (e.g. `"familiar=info"`); if the crate is renamed without also updating this filter, logs go silent.
+- The agent runs from an isolated copy of the repo at `daemon/runs/<timestamp>.../worktree/` — edits must land there, not in the main repo's `daemon/src/`. Both trees share the same `.git/` via `git worktree`, so `git status` in the main checkout will show any accidental writes.
