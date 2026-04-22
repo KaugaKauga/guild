@@ -37,7 +37,7 @@ pub struct PipelineSnapshot {
     pub stage: Stage,
     pub branch_name: String,
     pub pr_number: Option<u64>,
-    /// Brief status text shown in the TUI (e.g. "copilot running…").
+    /// Brief status text shown in the TUI (e.g. "agent running…").
     pub status_text: String,
 }
 

@@ -1,0 +1,17 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+	ignorecase = true
+	precomposeunicode = true
+[remote "origin"]
+	url = git@github.com:KaugaKauga/guild.git
+[user]
+	email = guild@users.noreply.github.com
+	name = Guild
+[branch "guild/issue-49"]
+	remote = origin
+	merge = refs/heads/guild/issue-49
+[branch "guild/issue-51"]
+	remote = origin
+	merge = refs/heads/guild/issue-51

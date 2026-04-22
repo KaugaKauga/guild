@@ -1,10 +1,11 @@
+mod agent;
 mod banner;
-mod copilot;
 mod db;
 mod github;
 mod pipeline;
 mod tui;
 
+use agent::Backend;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
@@ -47,13 +48,18 @@ enum Commands {
         #[arg(short, long, default_value_t = 30)]
         poll_interval: u64,
 
-        /// Name or path of the copilot CLI binary
+        /// Which agent CLI to drive: `copilot` or `claude`.
         #[arg(long, default_value = "copilot")]
-        copilot_cmd: String,
+        backend: Backend,
 
-        /// AI model to use (e.g. claude-opus-4.6, gpt-5.2)
-        #[arg(short = 'm', long, default_value = "claude-opus-4.6")]
-        model: String,
+        /// Path or name of the agent CLI binary. Defaults to the binary name
+        /// for the selected backend (`copilot` or `claude`).
+        #[arg(long, alias = "copilot-cmd")]
+        agent_cmd: Option<String>,
+
+        /// AI model to use. Defaults to a sensible model per backend if unset.
+        #[arg(short = 'm', long)]
+        model: Option<String>,
 
         /// Directory where run artifacts are stored
         #[arg(long, default_value = "./runs")]
@@ -90,7 +96,8 @@ pub struct Config {
     pub repo: String,
     pub label: String,
     pub poll_interval: u64,
-    pub copilot_cmd: String,
+    pub backend: Backend,
+    pub agent_cmd: String,
     pub model: String,
     pub runs_dir: PathBuf,
     pub repos_dir: PathBuf,
@@ -108,7 +115,8 @@ async fn main() -> Result<()> {
             repo_flag,
             label,
             poll_interval,
-            copilot_cmd,
+            backend,
+            agent_cmd,
             model,
             runs_dir,
             repos_dir,
@@ -120,11 +128,15 @@ async fn main() -> Result<()> {
                 .or(repo_flag)
                 .expect("repo is required: guild start <owner/repo>");
 
+            let agent_cmd = agent_cmd.unwrap_or_else(|| backend.default_cmd().to_string());
+            let model = model.unwrap_or_else(|| backend.default_model().to_string());
+
             let config = Config {
                 repo,
                 label,
                 poll_interval,
-                copilot_cmd,
+                backend,
+                agent_cmd,
                 model,
                 runs_dir: PathBuf::from(&runs_dir),
                 repos_dir: PathBuf::from(&repos_dir),
@@ -192,12 +204,12 @@ fn run_status(runs_dir: &str) -> Result<()> {
 fn stage_status_text(stage: &pipeline::Stage, has_running_task: bool) -> String {
     use pipeline::Stage;
     if has_running_task && stage.needs_agent() {
-        return "copilot running…".into();
+        return "agent running…".into();
     }
     match stage {
         Stage::Plan | Stage::Implement | Stage::Verify | Stage::Fix => {
             if has_running_task {
-                "copilot running…".into()
+                "agent running…".into()
             } else {
                 "waiting for slot…".into()
             }
@@ -273,7 +285,8 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     info!("  repo           : {}", config.repo);
     info!("  label          : {}", config.label);
     info!("  poll_interval  : {}s", config.poll_interval);
-    info!("  copilot_cmd    : {}", config.copilot_cmd);
+    info!("  backend        : {}", config.backend);
+    info!("  agent_cmd      : {}", config.agent_cmd);
     info!("  model          : {}", config.model);
     info!("  runs_dir       : {}", config.runs_dir.display());
     info!("  repos_dir      : {}", config.repos_dir.display());
@@ -327,7 +340,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
     }
 
     // --- concurrency primitives --------------------------------------------
-    // The semaphore only gates copilot (agent) tasks.  Orchestrator stages
+    // The semaphore only gates agent tasks.  Orchestrator stages
     // (Ingest, Understand, Submit, Watch) run without a permit.
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
 
@@ -558,7 +571,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
                 // Watch already handled in Pass 1.
                 pipeline::Stage::Watch => {}
 
-                // -- Agent stages: spawn copilot task with semaphore ---------
+                // -- Agent stages: spawn agent task with semaphore ---------
                 pipeline::Stage::Plan
                 | pipeline::Stage::Implement
                 | pipeline::Stage::Verify
@@ -605,7 +618,7 @@ async fn run_start(mut config: Config, no_tui: bool) -> Result<()> {
                 }
 
                 // -- Orchestrator stages: spawn lightweight task -------------
-                // No semaphore needed — these don't run copilot.
+                // No semaphore needed — these don't invoke the agent CLI.
                 pipeline::Stage::Ingest | pipeline::Stage::Understand | pipeline::Stage::Submit => {
                     running.insert(key);
                     let cfg = config.clone();

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::copilot;
+use crate::agent;
 use crate::github;
 use crate::Config;
 
@@ -76,7 +76,7 @@ impl Stage {
         8
     }
 
-    /// Returns true if this stage requires a copilot agent to run.
+    /// Returns true if this stage requires the agent CLI to run.
     /// These stages acquire a semaphore permit in the orchestrator.
     pub fn needs_agent(&self) -> bool {
         matches!(
@@ -397,15 +397,16 @@ impl Pipeline {
         let prompt_path = self.run_dir.join("prompt_plan.md");
         fs::write(&prompt_path, &prompt).context("Plan: failed to write prompt_plan.md")?;
 
-        copilot::run_copilot(
-            &config.copilot_cmd,
+        agent::run(
+            config.backend,
+            &config.agent_cmd,
             &config.model,
             &prompt_path,
             &self.worktree,
             &self.run_dir,
         )
         .await
-        .context("Plan: copilot run failed")?;
+        .context("Plan: agent run failed")?;
 
         self.stage = Stage::Implement;
         Ok(true)
@@ -446,15 +447,16 @@ impl Pipeline {
         fs::write(&prompt_path, &prompt)
             .context("Implement: failed to write prompt_implement.md")?;
 
-        copilot::run_copilot(
-            &config.copilot_cmd,
+        agent::run(
+            config.backend,
+            &config.agent_cmd,
             &config.model,
             &prompt_path,
             &self.worktree,
             &self.run_dir,
         )
         .await
-        .context("Implement: copilot run failed")?;
+        .context("Implement: agent run failed")?;
 
         self.stage = Stage::Verify;
         Ok(true)
@@ -473,15 +475,16 @@ impl Pipeline {
         let prompt_path = self.run_dir.join("prompt_verify.md");
         fs::write(&prompt_path, &prompt).context("Verify: failed to write prompt_verify.md")?;
 
-        copilot::run_copilot(
-            &config.copilot_cmd,
+        agent::run(
+            config.backend,
+            &config.agent_cmd,
             &config.model,
             &prompt_path,
             &self.worktree,
             &self.run_dir,
         )
         .await
-        .context("Verify: copilot run failed")?;
+        .context("Verify: agent run failed")?;
 
         self.stage = Stage::Submit;
         Ok(true)
@@ -776,15 +779,16 @@ impl Pipeline {
         let prompt_path = self.run_dir.join("prompt_fix.md");
         fs::write(&prompt_path, &prompt).context("Fix: failed to write prompt_fix.md")?;
 
-        copilot::run_copilot(
-            &config.copilot_cmd,
+        agent::run(
+            config.backend,
+            &config.agent_cmd,
             &config.model,
             &prompt_path,
             &self.worktree,
             &self.run_dir,
         )
         .await
-        .context("Fix: copilot run failed")?;
+        .context("Fix: agent run failed")?;
 
         github::commit_all(&self.worktree, "guild: fix blockers")
             .await

@@ -13,8 +13,11 @@ request.
 
 The daemon itself is **thin glue**. It handles orchestration, state, and
 GitHub interaction. All the actual thinking — what to implement, how to fix a
-test, how to respond to a review — is delegated to **GitHub Copilot CLI**
-running in non-interactive mode with full permissions (`--yolo`).
+test, how to respond to a review — is delegated to an external **agent CLI**
+running in non-interactive mode with full permissions. Two backends are
+supported out of the box — **GitHub Copilot CLI** (`copilot --yolo`) and
+**Anthropic Claude CLI** (`claude --permission-mode bypassPermissions`) —
+selected via `--backend`.
 
 ## The pipeline
 
@@ -33,12 +36,12 @@ INGEST ─▶ UNDERSTAND ─▶ PLAN ─▶ IMPLEMENT ─▶ VERIFY ─▶ SUBMI
 |-------|-------------|--------------|
 | **INGEST** | Daemon | Fetches the issue body, metadata, comments, and linked issues via `gh`. Saves everything as JSON + markdown into the run directory. |
 | **UNDERSTAND** | Daemon | Ensures a shared bare clone of the repo exists (or fetches updates). Creates a git worktree with the working branch (`guild/issue-{N}`). Scans for CI workflows, contributing docs, dependency manifests. Reads `.guild/learnings.md` for repo-specific agent knowledge. Builds a directory tree. |
-| **PLAN** | Copilot | Reads the issue + repo summary. Produces `plan.md` — which files to touch, what tests to write, what UI wiring is needed. |
-| **IMPLEMENT** | Copilot | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. Appends any repo-specific learnings to `.guild/learnings.md`. |
-| **VERIFY** | Copilot | Runs linting and basic checks. Fixes lint errors. Does **not** run full test suites that might hang (watch mode, browser tests). Trusts CI for that. |
+| **PLAN** | Agent | Reads the issue + repo summary. Produces `plan.md` — which files to touch, what tests to write, what UI wiring is needed. |
+| **IMPLEMENT** | Agent | Writes production code and tests following the plan. Wires changes into the UI so they're actually reachable, not just isolated files. Appends any repo-specific learnings to `.guild/learnings.md`. |
+| **VERIFY** | Agent | Runs linting and basic checks. Fixes lint errors. Does **not** run full test suites that might hang (watch mode, browser tests). Trusts CI for that. |
 | **SUBMIT** | Daemon | Commits all changes, pushes the branch, opens a **draft** pull request. Never marks it ready. |
 | **WATCH** | Daemon | Polls the PR every cycle. Computes a "blocker fingerprint" from: failed CI checks, review decision, mergeable state, and `@guild` comment mentions. When the fingerprint changes, enters FIX. |
-| **FIX** | Copilot | Reads the blocker report (failed checks, review comments, `@guild` mentions). Fixes the code. Appends any learnings to `.guild/learnings.md`. Daemon commits and pushes. Returns to WATCH. |
+| **FIX** | Agent | Reads the blocker report (failed checks, review comments, `@guild` mentions). Fixes the code. Appends any learnings to `.guild/learnings.md`. Daemon commits and pushes. Returns to WATCH. |
 | **DONE** | Daemon | All checks green, review approved (or none), no `@guild` comments pending. Pipeline complete. |
 
 ### The WATCH ↔ FIX loop
@@ -58,7 +61,9 @@ After the PR is submitted, Guild enters a monitoring loop:
 ### Prerequisites
 
 - [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated (`gh auth login`)
-- [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) (`copilot`) — installed and authenticated
+- One of the supported agent CLIs:
+  - [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) (`copilot`) — installed and authenticated, **or**
+  - [Claude CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) — installed and authenticated
 - Rust toolchain (`cargo`)
 
 ### Build
@@ -80,7 +85,8 @@ Or with non-default options:
 guild start owner/repo \
   --label guild \
   --poll-interval 30 \
-  --model claude-opus-4.6 \
+  --backend claude \
+  --model claude-opus-4-7 \
   --max-concurrent 5 \
   --no-tui
 ```
@@ -116,7 +122,9 @@ Comments without `@guild` are left alone.
 | `--repo` / `-r` | *required* | GitHub repo to watch (`owner/repo`) |
 | `--label` / `-l` | `guild` | Only issues with this label get picked up |
 | `--poll-interval` / `-p` | `30` | Seconds between polling cycles |
-| `--copilot-cmd` | `copilot` | Path or name of the Copilot CLI binary |
+| `--backend` | `copilot` | Agent CLI backend: `copilot` or `claude` |
+| `--agent-cmd` | backend default | Path or name of the agent CLI binary (alias: `--copilot-cmd`) |
+| `--model` / `-m` | backend default | Model identifier passed through to the agent CLI |
 | `--runs-dir` | `./runs` | Where run artifacts and worktrees are stored |
 | `--repos-dir` | `./repos` | Where shared bare clones are stored (one per repo) |
 
@@ -130,7 +138,10 @@ guild/
       db.rs                   # SQLite state persistence (guild.db)
       github.rs               # All gh/git CLI wrappers
       pipeline.rs             # Per-issue state machine (the 9 stages)
-      copilot.rs              # Spawns copilot with: -p <prompt> --yolo --no-ask-user
+      agent/                  # Agent CLI dispatch
+        mod.rs                # Backend enum + shared spawn/log runner
+        copilot.rs            # copilot -p <prompt> --yolo --no-ask-user
+        claude.rs             # claude -p --permission-mode bypassPermissions
     Cargo.toml
   agents/                     # Agent prompt templates (per-stage)
     plan.md
@@ -146,7 +157,7 @@ guild/
       issue_body.md           # Issue description
       issue_comments.json     # Issue comments
       repo_summary.md         # Repo structure, CI, docs
-      plan.md                 # Copilot's implementation plan
+      plan.md                 # Agent's implementation plan
       verify_report.md        # Lint/check results
       blocker_report.md       # What's blocking the PR
       learnings.md            # Repo-specific learnings (copied from worktree)
@@ -170,27 +181,36 @@ single transaction.
 On first run after upgrading, any existing `state.json` is automatically
 migrated into the database and renamed to `state.json.bak`.
 
-### Copilot integration
+### Agent integration
 
 For each intelligent stage (PLAN, IMPLEMENT, VERIFY, FIX), the daemon:
 
 1. Generates a prompt file with all relevant context (issue body, repo summary, blocker report, etc.)
-2. Invokes Copilot in non-interactive mode with full permissions:
+2. Invokes the configured agent CLI in non-interactive mode with full permissions:
    ```
-   copilot -p <prompt_content> --yolo --no-ask-user
+   # --backend copilot (default)
+   copilot -p <prompt_content> --model <m> --yolo --no-ask-user
+
+   # --backend claude
+   claude -p --permission-mode bypassPermissions --model <m> --output-format text
+   # (prompt is piped via stdin to avoid argv size limits)
    ```
-3. Copilot reads the prompt, operates on files in the worktree, and exits
+3. The agent reads the prompt, operates on files in the worktree, and exits
 4. The daemon checks the exit code and advances (or retries)
 
-The `--yolo` flag grants all permissions (file editing, shell commands, network access)
-without approval prompts. The `--no-ask-user` flag prevents Copilot from pausing to
-ask clarifying questions.
+Each backend's authorisation flag (`--yolo` for Copilot, `--permission-mode
+bypassPermissions` for Claude) grants all permissions (file editing, shell
+commands, network access) without approval prompts. Copilot's `--no-ask-user`
+additionally prevents it from pausing to ask clarifying questions.
+
+Agent logs for each stage land in `runs/{run}/agent_<stage>.log` so CLI
+spinners can't corrupt the TUI.
 
 ### Separation of concerns
 
 The daemon makes **zero** implementation decisions. It only decides *when* to invoke
-Copilot and *what context* to provide. All intelligence — what code to write, how to
-fix a test, how to address a review comment — lives in the Copilot process.
+the agent and *what context* to provide. All intelligence — what code to write, how
+to fix a test, how to address a review comment — lives in the agent process.
 
 ### Repo learnings
 
@@ -209,6 +229,6 @@ and are available to future Guild runs on the same repo.
 
 1. **The agent reads everything.** Don't pre-parse or summarize. Hand it the raw issue, the raw repo tree, the raw CI output.
 2. **Never mark a PR ready.** The daemon creates draft PRs only. A human decides when to merge.
-3. **Never silence a failing check.** If Copilot can't fix it, the pipeline retries. If it's truly stuck, the daemon keeps polling until a human intervenes.
+3. **Never silence a failing check.** If the agent can't fix it, the pipeline retries. If it's truly stuck, the daemon keeps polling until a human intervenes.
 4. **State survives restarts.** Kill the daemon at any point, restart it, and it picks up where it left off.
 5. **`@guild` is the control surface.** Comment on the PR to direct the agent. Everything else is ignored.
